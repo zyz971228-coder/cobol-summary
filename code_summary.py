@@ -301,8 +301,11 @@ class CopybookResolver:
         Returns:
             Full path to copybook or None if not found
         """
-        # Common copybook extensions
-        extensions = ['', '.cpy', '.CPY', '.cob', '.COB', '.txt']
+        # Common copybook extensions (including .cbl which is often used)
+        extensions = ['', '.cpy', '.CPY', '.cob', '.COB', '.cbl', '.CBL', '.txt']
+
+        # Also try case variations of the name itself
+        name_variations = [name, name.upper(), name.lower(), name.capitalize()]
 
         for copybook_dir in self.copybook_dirs:
             search_dirs = [copybook_dir]
@@ -310,10 +313,13 @@ class CopybookResolver:
                 search_dirs.insert(0, os.path.join(copybook_dir, library))
 
             for search_dir in search_dirs:
-                for ext in extensions:
-                    path = os.path.join(search_dir, f"{name}{ext}")
-                    if os.path.isfile(path):
-                        return path
+                if not os.path.isdir(search_dir):
+                    continue
+                for name_var in name_variations:
+                    for ext in extensions:
+                        path = os.path.join(search_dir, f"{name_var}{ext}")
+                        if os.path.isfile(path):
+                            return path
 
         return None
 
@@ -895,6 +901,60 @@ class SummaryValidator:
 
         return files
 
+    # COBOL reserved words and common terms to ignore during validation
+    IGNORED_TERMS = {
+        # Common English words
+        'THE', 'AND', 'FOR', 'NOT', 'WITH', 'FROM', 'WHEN', 'THEN', 'ELSE',
+        'THIS', 'THAT', 'WHICH', 'WHERE', 'WHAT', 'HOW', 'WHY', 'ARE', 'WAS',
+        'WILL', 'CAN', 'MAY', 'MUST', 'INTO', 'ONTO', 'UPON', 'ALSO', 'BOTH',
+        'EACH', 'SOME', 'SUCH', 'THAN', 'VERY', 'JUST', 'ONLY', 'OVER', 'UNDER',
+        'USED', 'USING', 'USES', 'CALLED', 'BASED', 'FOLLOWING', 'BEFORE', 'AFTER',
+
+        # COBOL reserved words / keywords
+        'COBOL', 'PROGRAM', 'DIVISION', 'SECTION', 'PROCEDURE', 'DATA', 'FILE',
+        'WORKING', 'STORAGE', 'LINKAGE', 'IDENTIFICATION', 'ENVIRONMENT',
+        'CONFIGURATION', 'INPUT', 'OUTPUT', 'INPUT-OUTPUT', 'EXTENDS',
+        'PERFORM', 'THRU', 'THROUGH', 'UNTIL', 'TIMES', 'VARYING',
+        'MOVE', 'ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'COMPUTE',
+        'IF', 'ELSE', 'END-IF', 'EVALUATE', 'WHEN', 'OTHER', 'END-EVALUATE',
+        'READ', 'WRITE', 'REWRITE', 'DELETE', 'START', 'OPEN', 'CLOSE',
+        'CALL', 'USING', 'RETURNING', 'END-CALL', 'GOBACK', 'STOP', 'RUN',
+        'ACCEPT', 'DISPLAY', 'STRING', 'UNSTRING', 'INSPECT', 'REPLACING',
+        'INITIALIZE', 'SET', 'SEARCH', 'SORT', 'MERGE', 'RELEASE', 'RETURN',
+        'GO', 'GOTO', 'EXIT', 'CONTINUE', 'NEXT', 'SENTENCE',
+        'PIC', 'PICTURE', 'VALUE', 'VALUES', 'OCCURS', 'DEPENDING', 'INDEXED',
+        'REDEFINES', 'RENAMES', 'COPY', 'REPLACING', 'FILLER',
+        'BINARY', 'COMP', 'COMP-1', 'COMP-2', 'COMP-3', 'COMP-4', 'COMP-5',
+        'PACKED-DECIMAL', 'DISPLAY', 'USAGE',
+        'HIGH-VALUES', 'LOW-VALUES', 'SPACES', 'ZEROS', 'ZEROES', 'QUOTES',
+        'TRUE', 'FALSE', 'NULL', 'NULLS',
+        'ASCENDING', 'DESCENDING', 'ALPHABETIC', 'NUMERIC', 'ALPHANUMERIC',
+        'POSITIVE', 'NEGATIVE', 'ZERO', 'NOT',
+        'GREATER', 'LESS', 'EQUAL', 'THAN',
+        'STATUS', 'ERROR', 'EXCEPTION', 'OVERFLOW', 'INVALID', 'END',
+        'AT', 'ON', 'SIZE', 'KEY', 'RECORD', 'RECORDS', 'BLOCK', 'CONTAINS',
+        'LABEL', 'STANDARD', 'ORGANIZATION', 'ACCESS', 'MODE', 'SEQUENTIAL',
+        'RANDOM', 'DYNAMIC', 'RELATIVE', 'INDEXED',
+        'FD', 'SD', 'SELECT', 'ASSIGN', 'ALTERNATE', 'OPTIONAL',
+
+        # Common programming/documentation terms
+        'CODE', 'PROCESS', 'PROCESSING', 'VALIDATE', 'VALIDATION', 'CHECK',
+        'FUNCTION', 'ROUTINE', 'MODULE', 'LOGIC', 'FLOW', 'STEP', 'STEPS',
+        'MAIN', 'INIT', 'INITIALIZE', 'FINALIZE', 'BEGIN', 'END', 'START', 'FINISH',
+        'SUMMARY', 'OVERVIEW', 'DESCRIPTION', 'PURPOSE', 'CONTEXT', 'DOMAIN',
+        'BUSINESS', 'RULE', 'RULES', 'REQUIREMENT', 'REQUIREMENTS',
+        'TABLE', 'TABLES', 'FIELD', 'FIELDS', 'COLUMN', 'COLUMNS', 'ROW', 'ROWS',
+        'CUSTOMER', 'ORDER', 'ITEM', 'ITEMS', 'PRODUCT', 'PRODUCTS', 'ACCOUNT',
+        'DATE', 'TIME', 'YEAR', 'MONTH', 'DAY', 'HOUR', 'MINUTE', 'SECOND',
+        'TOTAL', 'COUNT', 'SUM', 'AVERAGE', 'MAX', 'MIN', 'AMOUNT',
+        'YES', 'NO', 'NONE', 'ALL', 'ANY', 'FIRST', 'LAST', 'NEXT', 'PREVIOUS',
+
+        # Markdown / document formatting artifacts
+        'MERMAID', 'GRAPH', 'FLOWCHART', 'DIAGRAM', 'SUBGRAPH', 'EOF',
+        'NOTE', 'NOTES', 'WARNING', 'INFO', 'TIP', 'IMPORTANT',
+        'EXAMPLE', 'EXAMPLES', 'SEE', 'REFERENCE', 'REFERENCES',
+    }
+
     def validate_summary(self, summary: str) -> ValidationResult:
         """
         Validate a generated summary.
@@ -912,13 +972,18 @@ class SummaryValidator:
 
         # Extract mentioned elements from summary
         # Look for code-like references (backticks or all-caps identifiers)
-        mentioned_pattern = re.compile(r'`([^`]+)`|(?<!\w)([A-Z][A-Z0-9-]{2,})(?!\w)')
+        # Require at least 3 characters and contain a hyphen or be clearly a paragraph name
+        mentioned_pattern = re.compile(r'`([A-Z][A-Z0-9-]{2,})`|(?<!\w)([A-Z][A-Z0-9]*-[A-Z0-9-]+)(?!\w)')
 
         for match in mentioned_pattern.finditer(summary):
             element = (match.group(1) or match.group(2)).upper()
 
-            # Skip common English words
-            if element in {'THE', 'AND', 'FOR', 'NOT', 'WITH', 'FROM', 'WHEN', 'THEN', 'ELSE'}:
+            # Skip ignored terms (COBOL keywords, common words, etc.)
+            if element in self.IGNORED_TERMS:
+                continue
+
+            # Skip if it looks like a generic term (no hyphen and less than 4 chars)
+            if '-' not in element and len(element) < 4:
                 continue
 
             # Check if element exists in source
@@ -1156,7 +1221,9 @@ def task_load_and_enrich_cobol_files(**context) -> str:
     jcl_dir = config["jcl_dir"]
 
     # Initialize components
-    copybook_resolver = CopybookResolver(copybook_dirs) if config["enable_copybook_resolution"] else None
+    # Add input directory to copybook search paths (copybooks often stored with source)
+    all_copybook_dirs = copybook_dirs + [input_dir]
+    copybook_resolver = CopybookResolver(all_copybook_dirs) if config["enable_copybook_resolution"] else None
     jcl_extractor = JCLContextExtractor(jcl_dir) if config["enable_jcl_context"] else None
 
     enriched_files = []
@@ -1274,29 +1341,51 @@ def task_chunk_large_programs(**context) -> str:
 
 def _format_jcl_context(jcl_json: Optional[str]) -> str:
     """Format JCL context for inclusion in prompts."""
-    if not jcl_json:
-        return "**JCL Context**: Not available"
+    if not jcl_json or jcl_json == 'null' or jcl_json.strip() == '':
+        return "**JCL Context**: Not available (no associated JCL file found)"
 
     try:
         jcl = json.loads(jcl_json)
+
+        # Handle case where jcl is None after parsing
+        if jcl is None:
+            return "**JCL Context**: Not available (no associated JCL file found)"
+
+        # Validate that jcl is a dictionary
+        if not isinstance(jcl, dict):
+            return "**JCL Context**: Not available (invalid format)"
+
         lines = [
             "**JCL Execution Context**:",
             f"- Job Name: {jcl.get('job_name', 'Unknown')}",
             f"- Program: {jcl.get('program_name', 'Unknown')}",
-            "- File Assignments:"
         ]
-        for dd, desc in jcl.get('dd_statements', {}).items():
-            lines.append(f"  - {dd}: {desc}")
-        if jcl.get('parameters'):
-            lines.append(f"- Parameters: {', '.join(jcl['parameters'])}")
-        if jcl.get('preceding_steps'):
-            lines.append(f"- Preceding Steps: {', '.join(jcl['preceding_steps'])}")
-        if jcl.get('following_steps'):
-            lines.append(f"- Following Steps: {', '.join(jcl['following_steps'])}")
+
+        dd_statements = jcl.get('dd_statements', {})
+        if dd_statements and isinstance(dd_statements, dict):
+            lines.append("- File Assignments:")
+            for dd, desc in dd_statements.items():
+                lines.append(f"  - {dd}: {desc}")
+
+        parameters = jcl.get('parameters', [])
+        if parameters and isinstance(parameters, list) and len(parameters) > 0:
+            lines.append(f"- Parameters: {', '.join(str(p) for p in parameters)}")
+
+        preceding = jcl.get('preceding_steps', [])
+        if preceding and isinstance(preceding, list) and len(preceding) > 0:
+            lines.append(f"- Preceding Steps: {', '.join(str(s) for s in preceding)}")
+
+        following = jcl.get('following_steps', [])
+        if following and isinstance(following, list) and len(following) > 0:
+            lines.append(f"- Following Steps: {', '.join(str(s) for s in following)}")
 
         return '\n'.join(lines)
-    except Exception:
-        return "**JCL Context**: Parse error"
+    except json.JSONDecodeError as e:
+        logging.warning(f"JCL context JSON decode error: {e}")
+        return "**JCL Context**: Not available (JSON decode error)"
+    except Exception as e:
+        logging.warning(f"JCL context format error: {e}")
+        return "**JCL Context**: Not available (format error)"
 
 
 def task_generate_overview_parallel(**context) -> str:
