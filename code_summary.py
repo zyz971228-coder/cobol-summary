@@ -1341,7 +1341,13 @@ def task_chunk_large_programs(**context) -> str:
 
 def _format_jcl_context(jcl_json: Optional[str]) -> str:
     """Format JCL context for inclusion in prompts."""
-    if not jcl_json or jcl_json == 'null' or jcl_json.strip() == '':
+    # Handle None, NaN (float), empty string, and 'null' string
+    if jcl_json is None:
+        return "**JCL Context**: Not available (no associated JCL file found)"
+    if not isinstance(jcl_json, str):
+        # Handle pandas NaN (float) or other non-string types
+        return "**JCL Context**: Not available (no associated JCL file found)"
+    if jcl_json == 'null' or jcl_json.strip() == '':
         return "**JCL Context**: Not available (no associated JCL file found)"
 
     try:
