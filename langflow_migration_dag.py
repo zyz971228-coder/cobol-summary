@@ -58,6 +58,7 @@ import time
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.models import Variable
+from src.config import get_llm
 
 import pandas as pd
 import requests
@@ -80,8 +81,8 @@ DEFAULT_CONFIG = {
     "ragflow_vector_weight": 0.3,
     "ragflow_top_n": 8,
     # General Settings
-    "cobol_input_dir": "/data/projects/cobol-test/Input",
-    "cobol_output_dir": "/data/projects/cobol-test/Output",
+    "cobol_input_dir": "/opt/airflow/data/projects/cobol-test/Input",
+    "cobol_output_dir": "/opt/airflow/data/projects/cobol-test/Output",
     "max_tokens": 4096,
     "temperature": 0.7,
     "use_ragflow": False,  # Set to True to use RAGFlow Chat with knowledge base
@@ -336,14 +337,14 @@ def get_config() -> dict:
     # Try to get from Airflow Variables
     try:
         # VLLM Configuration
-        config["vllm_api_base"] = Variable.get("VLLM_API_BASE", default_var=config["vllm_api_base"])
-        config["vllm_api_key"] = Variable.get("VLLM_API_KEY", default_var="")
-        config["vllm_model_name"] = Variable.get("VLLM_MODEL_NAME", default_var=config["vllm_model_name"])
+        config["vllm_api_base"] = Variable.get("LLM_BASE_URL", default_var="http://172.31.2.45/v1")
+        config["vllm_api_key"] = Variable.get("LLM_API_KEY", default_var="EMPTY")
+        config["vllm_model_name"] = Variable.get("LLM_MODEL_NAME", default_var="qwen3_coder:30b")
 
         # RAGFlow Configuration
-        config["ragflow_api_base"] = Variable.get("RAGFLOW_API_BASE", default_var=config["ragflow_api_base"])
+        config["ragflow_api_base"] = Variable.get("RAGFLOW_HOST", default_var="http://ragflow-server:9380")
         config["ragflow_api_key"] = Variable.get("RAGFLOW_API_KEY", default_var="")
-        config["ragflow_chat_id"] = Variable.get("RAGFLOW_CHAT_ID", default_var="")
+        config["ragflow_chat_id"] = Variable.get("RAGFLOW_CHAT_ID", default_var="test")
 
         # RAGFlow Chat Settings
         config["ragflow_similarity_threshold"] = float(Variable.get(
@@ -422,26 +423,6 @@ def create_ragflow_client(config: dict) -> RAGFlowChatClient:
         vector_weight=config.get("ragflow_vector_weight", 0.3),
         top_n=config.get("ragflow_top_n", 8),
     )
-
-
-def create_llm(config: dict):
-    """
-    Create LLM instance using LangChain (for non-RAGFlow usage).
-
-    This function creates a VLLM-compatible ChatOpenAI instance.
-    For RAGFlow with knowledge base, use create_ragflow_client() instead.
-    """
-    from langchain_openai import ChatOpenAI
-
-    # Use VLLM API (OpenAI-compatible)
-    return ChatOpenAI(
-        model=config["vllm_model_name"],
-        openai_api_base=config["vllm_api_base"],
-        openai_api_key=config.get("vllm_api_key", "EMPTY"),
-        max_tokens=config.get("max_tokens", 4096),
-        temperature=config.get("temperature", 0.7),
-    )
-
 
 def read_cobol_files(input_dir: str) -> pd.DataFrame:
     """
@@ -704,7 +685,7 @@ def task_generate_program_overview(**context) -> str:
     else:
         # Use standard VLLM
         logging.info("Using VLLM (non-RAG mode)")
-        llm = create_llm(config)
+        llm = get_llm()
         df_result = batch_process_with_llm(
             df=df,
             llm=llm,
@@ -744,7 +725,7 @@ def task_generate_flowchart(**context) -> str:
         )
     else:
         logging.info("Using VLLM (non-RAG mode)")
-        llm = create_llm(config)
+        llm = get_llm()
         df_result = batch_process_with_llm(
             df=df,
             llm=llm,
@@ -784,7 +765,7 @@ def task_generate_input_output(**context) -> str:
         )
     else:
         logging.info("Using VLLM (non-RAG mode)")
-        llm = create_llm(config)
+        llm = get_llm()
         df_result = batch_process_with_llm(
             df=df,
             llm=llm,
@@ -853,7 +834,7 @@ default_args = {
 }
 
 with DAG(
-    dag_id='langflow_migration_dag',
+    dag_id='code_summary',
     default_args=default_args,
     description='COBOL Summary Generator - Migrated from Langflow',
     schedule_interval=None,  # Manual trigger only
@@ -898,132 +879,3 @@ with DAG(
 
     # Define task dependencies (sequential pipeline)
     load_files >> gen_overview >> gen_flowchart >> gen_io >> combine_save
-
-
-# ============================================================================
-# Standalone Execution Support
-# ============================================================================
-
-def run_standalone():
-    """
-    Run the pipeline standalone (outside of Airflow).
-
-    Useful for testing and debugging.
-    """
-    import argparse
-
-    parser = argparse.ArgumentParser(description='COBOL Summary Generator')
-    parser.add_argument('--input-dir', type=str, help='Input directory containing COBOL files')
-    parser.add_argument('--output-dir', type=str, help='Output directory for summaries')
-    parser.add_argument('--vllm-api-base', type=str, help='VLLM API base URL')
-    parser.add_argument('--vllm-model', type=str, help='VLLM model name')
-    parser.add_argument('--use-ragflow', action='store_true',
-                        help='Use RAGFlow Chat with knowledge base (requires RAGFLOW_API_KEY and RAGFLOW_CHAT_ID)')
-    parser.add_argument('--ragflow-api-base', type=str, help='RAGFlow API base URL')
-    parser.add_argument('--ragflow-api-key', type=str, help='RAGFlow API key')
-    parser.add_argument('--ragflow-chat-id', type=str, help='RAGFlow Chat Assistant ID')
-    args = parser.parse_args()
-
-    # Override config with command line args
-    config = get_config()
-    if args.input_dir:
-        config['cobol_input_dir'] = args.input_dir
-    if args.output_dir:
-        config['cobol_output_dir'] = args.output_dir
-    if args.vllm_api_base:
-        config['vllm_api_base'] = args.vllm_api_base
-    if args.vllm_model:
-        config['vllm_model_name'] = args.vllm_model
-    if args.use_ragflow:
-        config['use_ragflow'] = True
-    if args.ragflow_api_base:
-        config['ragflow_api_base'] = args.ragflow_api_base
-    if args.ragflow_api_key:
-        config['ragflow_api_key'] = args.ragflow_api_key
-    if args.ragflow_chat_id:
-        config['ragflow_chat_id'] = args.ragflow_chat_id
-
-    logging.basicConfig(level=logging.INFO)
-
-    print("=" * 60)
-    print("COBOL Summary Generator - Standalone Mode")
-    print("=" * 60)
-
-    # Show configuration
-    if config.get('use_ragflow'):
-        print("\nMode: RAGFlow Chat with Knowledge Base")
-        print(f"  RAGFlow API: {config['ragflow_api_base']}")
-        print(f"  Chat ID: {config.get('ragflow_chat_id', 'Not set')}")
-        print("  Knowledge Bases: Cobol-Source-Code, Cobol_Manuals")
-        print(f"  Similarity Threshold: {config.get('ragflow_similarity_threshold', 0.2)}")
-        print(f"  Vector Weight: {config.get('ragflow_vector_weight', 0.3)}")
-        print(f"  Top N: {config.get('ragflow_top_n', 8)}")
-    else:
-        print("\nMode: VLLM (Standard LLM without RAG)")
-        print(f"  VLLM API: {config['vllm_api_base']}")
-        print(f"  Model: {config['vllm_model_name']}")
-
-    # Step 1: Load files
-    print("\n[Step 1/5] Loading COBOL files...")
-    df = read_cobol_files(config['cobol_input_dir'])
-    print(f"  Loaded {len(df)} files")
-
-    if len(df) == 0:
-        print("No COBOL files found. Exiting.")
-        return
-
-    # Step 2-4: Generate analyses
-    ragflow_client = None
-    llm = None
-
-    if config.get('use_ragflow'):
-        print("\n  Initializing RAGFlow Chat client...")
-        ragflow_client = create_ragflow_client(config)
-        ragflow_client.create_session()
-
-        print("\n[Step 2/5] Generating Program Overview (with RAGFlow)...")
-        df = batch_process_with_ragflow(df, ragflow_client, PROGRAM_OVERVIEW_PROMPT, 'content', 'program_overview')
-
-        print("\n[Step 3/5] Generating Flowcharts (with RAGFlow)...")
-        df = batch_process_with_ragflow(df, ragflow_client, FLOWCHART_PROMPT, 'content', 'flowchart')
-
-        print("\n[Step 4/5] Generating Input/Output descriptions (with RAGFlow)...")
-        df = batch_process_with_ragflow(df, ragflow_client, INPUT_OUTPUT_PROMPT, 'content', 'input_output')
-
-        # Close RAGFlow session
-        ragflow_client.close_session()
-    else:
-        llm = create_llm(config)
-
-        print("\n[Step 2/5] Generating Program Overview...")
-        df = batch_process_with_llm(df, llm, PROGRAM_OVERVIEW_PROMPT, 'content', 'program_overview')
-
-        print("\n[Step 3/5] Generating Flowcharts...")
-        df = batch_process_with_llm(df, llm, FLOWCHART_PROMPT, 'content', 'flowchart')
-
-        print("\n[Step 4/5] Generating Input/Output descriptions...")
-        df = batch_process_with_llm(df, llm, INPUT_OUTPUT_PROMPT, 'content', 'input_output')
-
-    # Step 5: Combine and save
-    print("\n[Step 5/5] Combining and saving results...")
-    combined_results = []
-    for idx, row in df.iterrows():
-        combined = combine_analysis_results(
-            overview=row.get('program_overview', ''),
-            flowchart=row.get('flowchart', ''),
-            input_output=row.get('input_output', ''),
-            file_name=row['file_name']
-        )
-        combined_results.append(combined)
-
-    df['combined_result'] = combined_results
-    save_results(df, config['cobol_output_dir'])
-
-    print("\n" + "=" * 60)
-    print(f"Processing completed! {len(df)} files processed.")
-    print(f"Output saved to: {config['cobol_output_dir']}")
-    print("=" * 60)
-
-
-if __name__ == '__main__':
-    run_standalone()
