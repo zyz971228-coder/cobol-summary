@@ -1031,19 +1031,18 @@ class RAGFlowClient:
             self.create_session()
 
         try:
-            if stream:
-                # Streaming response
-                response_content = []
-                for message in self._session.ask(question=question, stream=True):
-                    if hasattr(message, 'content') and message.content:
-                        response_content.append(message.content)
+            # Session.ask() always returns a generator that must be iterated
+            # regardless of the stream parameter
+            response_content = []
+            for message in self._session.ask(question=question, stream=stream):
+                if hasattr(message, 'content') and message.content:
+                    response_content.append(message.content)
+
+            if response_content:
                 return ''.join(response_content)
             else:
-                # Non-streaming response
-                message = self._session.ask(question=question, stream=False)
-                if hasattr(message, 'content'):
-                    return message.content
-                return str(message)
+                logging.warning("RAGFlow returned empty response")
+                return "Error: Empty response from RAGFlow"
 
         except Exception as e:
             logging.error(f"RAGFlow chat failed: {e}")
