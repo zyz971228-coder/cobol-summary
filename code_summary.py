@@ -98,7 +98,7 @@ import time
 import re
 import hashlib
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -1008,7 +1008,8 @@ class RAGFlowClient:
         self,
         question: str,
         stream: bool = False,
-        create_new_session: bool = False
+        create_new_session: bool = False,
+        timeout: float = 300.0
     ) -> str:
         """
         Send a message to RAGFlow Chat and get response with RAG.
@@ -1022,6 +1023,7 @@ class RAGFlowClient:
             question: User question/prompt to send
             stream: Whether to use streaming response (default: False)
             create_new_session: Whether to create a new session for this chat
+            timeout: Maximum time to wait for response in seconds (default: 300)
 
         Returns:
             LLM response text
@@ -1030,16 +1032,34 @@ class RAGFlowClient:
         if self._session is None or create_new_session:
             self.create_session()
 
-        try:
-            # Session.ask() always returns a generator that must be iterated
-            # regardless of the stream parameter
+        def _consume_generator():
+            """Inner function to consume the generator, can be run with timeout."""
             response_content = []
             for message in self._session.ask(question=question, stream=stream):
                 if hasattr(message, 'content') and message.content:
                     response_content.append(message.content)
+                    logging.debug(f"RAGFlow received chunk: {len(message.content)} chars")
+            return response_content
+
+        try:
+            logging.info(f"RAGFlow sending request (stream={stream}, timeout={timeout}s)...")
+            logging.debug(f"Question preview: {question[:200]}..." if len(question) > 200 else f"Question: {question}")
+
+            # Use ThreadPoolExecutor for timeout support
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_consume_generator)
+                try:
+                    response_content = future.result(timeout=timeout)
+                except FuturesTimeoutError:
+                    logging.error(f"RAGFlow request timed out after {timeout}s")
+                    return f"Error: Request timed out after {timeout} seconds"
+
+            logging.info(f"RAGFlow received response: {len(response_content)} chunks")
 
             if response_content:
-                return ''.join(response_content)
+                result = ''.join(response_content)
+                logging.info(f"RAGFlow response length: {len(result)} chars")
+                return result
             else:
                 logging.warning("RAGFlow returned empty response")
                 return "Error: Empty response from RAGFlow"
