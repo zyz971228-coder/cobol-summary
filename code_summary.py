@@ -6,7 +6,7 @@ This module provides a production-grade pipeline for converting COBOL source cod
 into comprehensive business documentation. It addresses the following critical
 challenges in mainframe modernization:
 
-1. Context Completeness - Handles Copybooks and JCL dependencies
+1. Context Completeness - Handles Copybooks dependencies
 2. Business Logic Extraction - Goes beyond line-by-line translation
 3. Token Efficiency - Intelligent chunking for large programs
 4. Accuracy Validation - Multi-stage verification
@@ -14,7 +14,7 @@ challenges in mainframe modernization:
 Architecture Review & Risk Assessment
 =====================================
 
-## TOP 5 CRITICAL DEFECTS IN ORIGINAL WORKFLOW
+## TOP 4 CRITICAL DEFECTS IN ORIGINAL WORKFLOW
 
 ### Defect #1: Missing Copybook Resolution (CRITICAL - Hallucination Risk)
 **Problem**: Original workflow reads only the main COBOL file without resolving
@@ -31,24 +31,7 @@ constants, and shared routines.
 - Recursively resolves nested copybooks
 - Builds complete enriched source for LLM analysis
 
-### Defect #2: No JCL Context (CRITICAL - Incomplete Business Understanding)
-**Problem**: COBOL programs are orchestrated by JCL which defines:
-- Input/Output file assignments (DD statements)
-- Program parameters (PARM=)
-- Execution sequence (EXEC PGM=)
-- Conditional execution (COND=)
-
-**Impact**:
-- Cannot accurately describe file purposes without DD names
-- Missing batch job context (what triggers this program?)
-- Incomplete understanding of program's role in larger process
-
-**Solution**: Implement JCLContextExtractor that:
-- Identifies associated JCL files
-- Extracts DD-to-program file mappings
-- Captures job flow and dependencies
-
-### Defect #3: Shallow Logic Extraction (HIGH - "Code Translation" Trap)
+### Defect #2: Shallow Logic Extraction (HIGH - "Code Translation" Trap)
 **Problem**: Current prompts ask for "main processes in PROCEDURE DIVISION"
 which produces syntax-level descriptions, not business logic.
 
@@ -63,7 +46,7 @@ which produces syntax-level descriptions, not business logic.
 - Phase 2: Data Flow Analysis (trace field transformations)
 - Phase 3: Business Rule Synthesis (extract domain logic)
 
-### Defect #4: No Chunking Strategy (HIGH - Token Explosion & Quality Degradation)
+### Defect #3: No Chunking Strategy (HIGH - Token Explosion & Quality Degradation)
 **Problem**: Entire COBOL file (potentially 50,000+ lines) sent to LLM at once.
 
 **Impact**:
@@ -77,7 +60,7 @@ which produces syntax-level descriptions, not business logic.
 - Maintain cross-chunk context via summary passing
 - Implement MapReduce-style aggregation
 
-### Defect #5: No Accuracy Verification (HIGH - Silent Failures)
+### Defect #4: No Accuracy Verification (HIGH - Silent Failures)
 **Problem**: No mechanism to validate generated summaries are correct.
 
 **Impact**:
@@ -88,7 +71,6 @@ which produces syntax-level descriptions, not business logic.
 
 **Solution**: Multi-layer validation:
 - Structural validation (do mentioned sections/paragraphs exist?)
-- Cross-reference validation (do file names match JCL DD statements?)
 - LLM self-reflection with source code grounding
 - Confidence scoring per section
 
@@ -136,11 +118,9 @@ DEFAULT_CONFIG = {
     "cobol_input_dir": "/opt/airflow/data/projects/cobol-test/Input",
     "cobol_output_dir": "/opt/airflow/data/projects/cobol-test/Output",
     "copybook_dirs": ["/opt/airflow/data/projects/cobol-test/Copybooks"],
-    "jcl_dir": "/opt/airflow/data/projects/cobol-test/JCL",
     # Processing Settings
     "max_tokens_per_chunk": 6000,  # Conservative limit for quality
     "enable_copybook_resolution": True,
-    "enable_jcl_context": True,
     "enable_validation": True,
     "parallel_workers": 3,
     "use_ragflow": False,
@@ -167,18 +147,6 @@ class CopybookReference:
     library: Optional[str] = None
     line_number: int = 0
     replacing_clauses: List[str] = field(default_factory=list)
-
-
-@dataclass
-class JCLContext:
-    """Extracted context from JCL files."""
-    job_name: str
-    program_name: str
-    dd_statements: Dict[str, str]  # DD name -> description/dataset
-    parameters: List[str]
-    preceding_steps: List[str]
-    following_steps: List[str]
-    condition_codes: Dict[str, str]
 
 
 @dataclass
@@ -231,7 +199,6 @@ class EnrichedCOBOLSource:
     original_content: str
     enriched_content: str  # With copybooks inlined
     resolved_copybooks: Dict[str, str]  # copybook name -> content
-    jcl_context: Optional[JCLContext]
     line_count: int
     estimated_tokens: int
 
@@ -442,141 +409,6 @@ class CopybookResolver:
             )
 
         return enriched, resolved
-
-
-# ============================================================================
-# JCL Context Extractor
-# ============================================================================
-
-class JCLContextExtractor:
-    """
-    Extracts execution context from JCL files.
-
-    Provides crucial information about:
-    - File assignments (DD statements)
-    - Program parameters
-    - Job flow and dependencies
-    """
-
-    # JCL Patterns
-    JOB_PATTERN = re.compile(r'^//(\w+)\s+JOB\s', re.MULTILINE)
-    EXEC_PATTERN = re.compile(r'^//(\w+)\s+EXEC\s+(?:PGM=)?(\w+)', re.MULTILINE)
-    DD_PATTERN = re.compile(
-        r'^//(\w+)\s+DD\s+(?:DSN=([^,\s]+)|SYSOUT=(\w)|DUMMY)',
-        re.MULTILINE
-    )
-    PARM_PATTERN = re.compile(r"PARM='([^']*)'|PARM=(\S+)", re.IGNORECASE)
-
-    def __init__(self, jcl_dir: str):
-        self.jcl_dir = jcl_dir
-
-    def find_jcl_for_program(self, program_name: str) -> List[str]:
-        """Find JCL files that execute the given program."""
-        jcl_files = []
-
-        if not os.path.isdir(self.jcl_dir):
-            return jcl_files
-
-        for root, _, files in os.walk(self.jcl_dir):
-            for file in files:
-                if file.endswith(('.jcl', '.JCL', '.txt')):
-                    path = os.path.join(root, file)
-                    try:
-                        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                        if re.search(rf'PGM={program_name}', content, re.IGNORECASE):
-                            jcl_files.append(path)
-                    except Exception:
-                        pass
-
-        return jcl_files
-
-    def extract_context(self, jcl_path: str, program_name: str) -> Optional[JCLContext]:
-        """
-        Extract context from a JCL file for a specific program.
-
-        Args:
-            jcl_path: Path to JCL file
-            program_name: Name of the COBOL program
-
-        Returns:
-            JCLContext object or None if extraction fails
-        """
-        try:
-            with open(jcl_path, 'r', encoding='utf-8', errors='ignore') as f:
-                content = f.read()
-        except Exception:
-            return None
-
-        # Find job name
-        job_match = self.JOB_PATTERN.search(content)
-        job_name = job_match.group(1) if job_match else "UNKNOWN"
-
-        # Find all EXEC steps
-        exec_matches = list(self.EXEC_PATTERN.finditer(content))
-
-        # Find the step executing our program
-        target_step = None
-        step_index = -1
-        for i, match in enumerate(exec_matches):
-            if match.group(2).upper() == program_name.upper():
-                target_step = match.group(1)
-                step_index = i
-                break
-
-        if not target_step:
-            return None
-
-        # Extract DD statements for this step
-        dd_statements = {}
-        step_content = self._extract_step_content(content, target_step)
-
-        for dd_match in self.DD_PATTERN.finditer(step_content):
-            dd_name = dd_match.group(1)
-            if dd_match.group(2):  # DSN=
-                dd_statements[dd_name] = f"Dataset: {dd_match.group(2)}"
-            elif dd_match.group(3):  # SYSOUT=
-                dd_statements[dd_name] = f"SYSOUT class {dd_match.group(3)}"
-            else:  # DUMMY
-                dd_statements[dd_name] = "DUMMY (no I/O)"
-
-        # Extract parameters
-        parameters = []
-        parm_match = self.PARM_PATTERN.search(step_content)
-        if parm_match:
-            parm_value = parm_match.group(1) or parm_match.group(2)
-            parameters = [p.strip() for p in parm_value.split(',')]
-
-        # Get preceding and following steps
-        preceding = [m.group(2) for m in exec_matches[:step_index]]
-        following = [m.group(2) for m in exec_matches[step_index+1:]]
-
-        return JCLContext(
-            job_name=job_name,
-            program_name=program_name,
-            dd_statements=dd_statements,
-            parameters=parameters,
-            preceding_steps=preceding,
-            following_steps=following,
-            condition_codes={}
-        )
-
-    def _extract_step_content(self, jcl_content: str, step_name: str) -> str:
-        """Extract content for a specific JCL step."""
-        lines = jcl_content.split('\n')
-        step_lines = []
-        in_step = False
-
-        for line in lines:
-            if line.startswith(f'//{step_name}'):
-                in_step = True
-            elif in_step and line.startswith('//') and not line.startswith('//*'):
-                if re.match(r'^//\w+\s+(EXEC|JOB)', line):
-                    break
-            if in_step:
-                step_lines.append(line)
-
-        return '\n'.join(step_lines)
 
 
 # ============================================================================
@@ -1036,12 +868,9 @@ IMPORTANT RULES:
 2. Translate technical operations into business terminology
 3. Identify business rules hidden in conditional logic
 4. Only mention code elements (paragraph names, file names) that actually exist in the source
-5. If you're uncertain about something, say so rather than guessing
-6. Consider the JCL context when describing file purposes"""
+5. If you're uncertain about something, say so rather than guessing"""
 
 PROGRAM_OVERVIEW_PROMPT_V2 = """Analyze this COBOL program and provide a comprehensive business overview.
-
-{jcl_context}
 
 ## Required Output Format:
 
@@ -1106,19 +935,17 @@ COBOL Source Code:
 
 INPUT_OUTPUT_PROMPT_V2 = """Analyze this COBOL program and document all inputs and outputs with BUSINESS context.
 
-{jcl_context}
-
 ## Required Output Format:
 
 ### Input Sources
-| Logical Name | Physical Name/DD | Business Description | Key Fields |
-|--------------|------------------|---------------------|------------|
-| [FD name] | [From JCL/ASSIGN] | [What business data?] | [Important fields] |
+| Logical Name | Physical Name | Business Description | Key Fields |
+|--------------|---------------|---------------------|------------|
+| [FD name] | [From ASSIGN] | [What business data?] | [Important fields] |
 
 ### Output Destinations
-| Logical Name | Physical Name/DD | Business Description | Content |
-|--------------|------------------|---------------------|---------|
-| [FD name] | [From JCL/ASSIGN] | [What business data?] | [What's written] |
+| Logical Name | Physical Name | Business Description | Content |
+|--------------|---------------|---------------------|---------|
+| [FD name] | [From ASSIGN] | [What business data?] | [What's written] |
 
 ### Working Storage Key Structures
 List important data structures that represent business entities:
@@ -1180,14 +1007,10 @@ def get_config() -> dict:
             "COPYBOOK_DIRS",
             default_var=",".join(config["copybook_dirs"])
         ).split(",")
-        config["jcl_dir"] = Variable.get("JCL_DIR", default_var=config["jcl_dir"])
 
         # Feature flags
         config["enable_copybook_resolution"] = Variable.get(
             "ENABLE_COPYBOOK_RESOLUTION", default_var="true"
-        ).lower() == "true"
-        config["enable_jcl_context"] = Variable.get(
-            "ENABLE_JCL_CONTEXT", default_var="true"
         ).lower() == "true"
         config["enable_validation"] = Variable.get(
             "ENABLE_VALIDATION", default_var="true"
@@ -1207,24 +1030,21 @@ def get_config() -> dict:
 
 def task_load_and_enrich_cobol_files(**context) -> str:
     """
-    Task 1: Load COBOL files and enrich with copybooks and JCL context.
+    Task 1: Load COBOL files and enrich with copybooks.
 
-    This addresses Defects #1 and #2 by:
+    This addresses Defect #1 by:
     - Resolving COPY statements
-    - Extracting JCL execution context
     """
     logging.info("Loading and enriching COBOL files...")
     config = get_config()
 
     input_dir = config["cobol_input_dir"]
     copybook_dirs = config["copybook_dirs"]
-    jcl_dir = config["jcl_dir"]
 
     # Initialize components
     # Add input directory to copybook search paths (copybooks often stored with source)
     all_copybook_dirs = copybook_dirs + [input_dir]
     copybook_resolver = CopybookResolver(all_copybook_dirs) if config["enable_copybook_resolution"] else None
-    jcl_extractor = JCLContextExtractor(jcl_dir) if config["enable_jcl_context"] else None
 
     enriched_files = []
     extensions = ['.cob', '.cbl', '.txt', '.cobol', '.COB', '.CBL']
@@ -1255,13 +1075,6 @@ def task_load_and_enrich_cobol_files(**context) -> str:
                         resolved_copybooks = {}
                         resolution_log = []
 
-                    # Extract JCL context
-                    jcl_context = None
-                    if jcl_extractor:
-                        jcl_files = jcl_extractor.find_jcl_for_program(program_name)
-                        if jcl_files:
-                            jcl_context = jcl_extractor.extract_context(jcl_files[0], program_name)
-
                     # Estimate tokens
                     estimated_tokens = len(enriched_content) // 4
 
@@ -1273,14 +1086,12 @@ def task_load_and_enrich_cobol_files(**context) -> str:
                         'enriched_content': enriched_content,
                         'resolved_copybooks': json.dumps(resolved_copybooks),
                         'copybook_log': json.dumps(resolution_log),
-                        'jcl_context': json.dumps(jcl_context.__dict__) if jcl_context else None,
                         'line_count': len(enriched_content.split('\n')),
                         'estimated_tokens': estimated_tokens,
                         'needs_chunking': estimated_tokens > config["max_tokens_per_chunk"]
                     })
 
                     logging.info(f"Enriched {file}: {len(resolved_copybooks)} copybooks, "
-                               f"JCL: {'Yes' if jcl_context else 'No'}, "
                                f"~{estimated_tokens} tokens")
 
                 except Exception as e:
@@ -1339,61 +1150,6 @@ def task_chunk_large_programs(**context) -> str:
     return df_chunked.to_json(orient='records')
 
 
-def _format_jcl_context(jcl_json: Optional[str]) -> str:
-    """Format JCL context for inclusion in prompts."""
-    # Handle None, NaN (float), empty string, and 'null' string
-    if jcl_json is None:
-        return "**JCL Context**: Not available (no associated JCL file found)"
-    if not isinstance(jcl_json, str):
-        # Handle pandas NaN (float) or other non-string types
-        return "**JCL Context**: Not available (no associated JCL file found)"
-    if jcl_json == 'null' or jcl_json.strip() == '':
-        return "**JCL Context**: Not available (no associated JCL file found)"
-
-    try:
-        jcl = json.loads(jcl_json)
-
-        # Handle case where jcl is None after parsing
-        if jcl is None:
-            return "**JCL Context**: Not available (no associated JCL file found)"
-
-        # Validate that jcl is a dictionary
-        if not isinstance(jcl, dict):
-            return "**JCL Context**: Not available (invalid format)"
-
-        lines = [
-            "**JCL Execution Context**:",
-            f"- Job Name: {jcl.get('job_name', 'Unknown')}",
-            f"- Program: {jcl.get('program_name', 'Unknown')}",
-        ]
-
-        dd_statements = jcl.get('dd_statements', {})
-        if dd_statements and isinstance(dd_statements, dict):
-            lines.append("- File Assignments:")
-            for dd, desc in dd_statements.items():
-                lines.append(f"  - {dd}: {desc}")
-
-        parameters = jcl.get('parameters', [])
-        if parameters and isinstance(parameters, list) and len(parameters) > 0:
-            lines.append(f"- Parameters: {', '.join(str(p) for p in parameters)}")
-
-        preceding = jcl.get('preceding_steps', [])
-        if preceding and isinstance(preceding, list) and len(preceding) > 0:
-            lines.append(f"- Preceding Steps: {', '.join(str(s) for s in preceding)}")
-
-        following = jcl.get('following_steps', [])
-        if following and isinstance(following, list) and len(following) > 0:
-            lines.append(f"- Following Steps: {', '.join(str(s) for s in following)}")
-
-        return '\n'.join(lines)
-    except json.JSONDecodeError as e:
-        logging.warning(f"JCL context JSON decode error: {e}")
-        return "**JCL Context**: Not available (JSON decode error)"
-    except Exception as e:
-        logging.warning(f"JCL context format error: {e}")
-        return "**JCL Context**: Not available (format error)"
-
-
 def task_generate_overview_parallel(**context) -> str:
     """
     Task 3: Generate program overviews with enhanced prompts.
@@ -1416,10 +1172,7 @@ def task_generate_overview_parallel(**context) -> str:
         """Process a single chunk."""
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        jcl_context = _format_jcl_context(row.get('jcl_context'))
-
         prompt = PROGRAM_OVERVIEW_PROMPT_V2.format(
-            jcl_context=jcl_context,
             cobol_code=row['chunk_content'][:30000]  # Safety limit
         )
 
@@ -1535,10 +1288,7 @@ def task_generate_io_parallel(**context) -> str:
     def process_chunk(row):
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        jcl_context = _format_jcl_context(row.get('jcl_context'))
-
         prompt = INPUT_OUTPUT_PROMPT_V2.format(
-            jcl_context=jcl_context,
             cobol_code=row['chunk_content'][:30000]
         )
 
@@ -1613,7 +1363,6 @@ def task_aggregate_chunks(**context) -> str:
             'program_name': first_row['program_name'],
             'original_content': first_row['original_content'],
             'enriched_content': first_row['enriched_content'],
-            'jcl_context': first_row.get('jcl_context'),
             'copybook_log': first_row.get('copybook_log'),
             'program_overview': combined_overview,
             'flowchart': combined_flowchart,
@@ -1740,17 +1489,6 @@ def task_combine_and_save(**context) -> dict:
 {chr(10).join(f'- {log}' for log in logs[:20])}
 """
 
-        # Build JCL context section
-        jcl_section = ""
-        if row.get('jcl_context'):
-            jcl_section = f"""
----
-
-## JCL Execution Context
-
-{_format_jcl_context(row['jcl_context'])}
-"""
-
         # Combine into final document
         combined = f"""# COBOL Program Analysis: {row['file_name']}
 
@@ -1771,8 +1509,6 @@ def task_combine_and_save(**context) -> dict:
 {row['input_output']}
 
 {validation_section}
-
-{jcl_section}
 
 {copybook_section}
 """
