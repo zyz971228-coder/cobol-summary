@@ -75,7 +75,15 @@ which produces syntax-level descriptions, not business logic.
 - Confidence scoring per section
 
 Author: Mainframe Modernization Architecture Team
-Version: 2.0.0
+Version: 3.0.0 - Enhanced with column-sensitive parsing and pre-analysis context injection
+
+Changes in v3.0:
+- Added column-sensitive COBOL parsing (Area A/B awareness)
+- Full COPY REPLACING clause implementation
+- Pre-analyzed control flow and business patterns injected into LLM prompts
+- DATA DIVISION context preserved for PROCEDURE DIVISION chunks
+- Enhanced validation against parsed structure
+- Thread-safe LLM client wrapper for parallel processing
 """
 
 from datetime import datetime, timedelta
@@ -97,6 +105,7 @@ from airflow.operators.python import PythonOperator
 from airflow.models import Variable
 
 import pandas as pd
+import threading
 
 # RAGFlow SDK for RAG-based generation
 try:
@@ -105,6 +114,30 @@ try:
 except ImportError:
     RAGFLOW_SDK_AVAILABLE = False
     logging.warning("ragflow-sdk not installed. Install with: pip install ragflow-sdk")
+
+# Enhanced COBOL Parser (v3.0)
+try:
+    from cobol_parser_enhanced import (
+        EnhancedCopybookResolver,
+        EnhancedCOBOLParser,
+        EnhancedBusinessRuleExtractor,
+        EnhancedCOBOLChunker,
+        COBOLLineParser,
+    )
+    from cobol_analysis_integration import (
+        ThreadSafeLLMClient,
+        process_cobol_file_enhanced,
+        create_enhanced_overview_prompt,
+        create_enhanced_flowchart_prompt,
+        create_enhanced_core_logic_prompt,
+        validate_summary_enhanced,
+        EnhancedSummaryValidator,
+        ENHANCED_SYSTEM_PROMPT,
+    )
+    ENHANCED_PARSER_AVAILABLE = True
+except ImportError:
+    ENHANCED_PARSER_AVAILABLE = False
+    logging.warning("Enhanced COBOL parser not available. Using legacy parser.")
 
 # ============================================================================
 # Configuration
@@ -143,6 +176,10 @@ DEFAULT_CONFIG = {
     "generate_structure": True,  # Program Structure Analysis
     "generate_core_logic": True,  # Detailed Core Logic with function list
     "generate_dependencies": True,  # Copybooks and Called Programs
+    # Enhanced Parser Options (v3.0)
+    "use_enhanced_parser": True,  # Use column-sensitive parser with full REPLACING support
+    "inject_preanalysis_context": True,  # Inject pre-analyzed structure into LLM prompts
+    "preserve_data_context": True,  # Include DATA DIVISION context in PROCEDURE chunks
 }
 
 # ============================================================================
@@ -1409,6 +1446,8 @@ def task_load_and_enrich_cobol_files(**context) -> str:
 
     This addresses Defect #1 by:
     - Resolving COPY statements
+    - Using enhanced parser for column-sensitive processing (v3.0)
+    - Extracting pre-analysis context for LLM prompts
     """
     logging.info("Loading and enriching COBOL files...")
     config = get_config()
@@ -1416,10 +1455,26 @@ def task_load_and_enrich_cobol_files(**context) -> str:
     input_dir = config["cobol_input_dir"]
     copybook_dirs = config["copybook_dirs"]
 
-    # Initialize components
     # Add input directory to copybook search paths (copybooks often stored with source)
     all_copybook_dirs = copybook_dirs + [input_dir]
-    copybook_resolver = CopybookResolver(all_copybook_dirs) if config["enable_copybook_resolution"] else None
+
+    # Determine which parser to use
+    use_enhanced = (
+        config.get("use_enhanced_parser", True) and
+        ENHANCED_PARSER_AVAILABLE and
+        config["enable_copybook_resolution"]
+    )
+
+    if use_enhanced:
+        logging.info("Using enhanced COBOL parser (v3.0) with column-sensitive processing")
+    else:
+        logging.info("Using legacy COBOL parser")
+
+    # Initialize legacy resolver if not using enhanced parser
+    if not use_enhanced:
+        copybook_resolver = CopybookResolver(all_copybook_dirs) if config["enable_copybook_resolution"] else None
+    else:
+        copybook_resolver = None
 
     enriched_files = []
     extensions = ['.cob', '.cbl', '.txt', '.cobol', '.COB', '.CBL']
@@ -1430,47 +1485,82 @@ def task_load_and_enrich_cobol_files(**context) -> str:
                 file_path = os.path.join(root, file)
 
                 try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        original_content = f.read()
+                    if use_enhanced:
+                        # Use enhanced parser with full features
+                        processed = process_cobol_file_enhanced(file_path, all_copybook_dirs, config)
 
-                    # Extract program name from source
-                    program_match = re.search(
-                        r'PROGRAM-ID\.\s*(\S+)',
-                        original_content,
-                        re.IGNORECASE
-                    )
-                    program_name = program_match.group(1).rstrip('.') if program_match else file.split('.')[0]
+                        enriched_files.append({
+                            'file_name': processed['file_name'],
+                            'file_path': file_path,
+                            'program_name': processed['program_name'],
+                            'original_content': processed['original_source'],
+                            'enriched_content': processed['enriched_source'],
+                            'resolved_copybooks': json.dumps(processed['resolved_copybooks']),
+                            'copybook_log': json.dumps(processed['resolution_log']),
+                            'line_count': len(processed['enriched_source'].split('\n')),
+                            'estimated_tokens': processed['estimated_tokens'],
+                            'needs_chunking': processed['estimated_tokens'] > config["max_tokens_per_chunk"],
+                            # Enhanced parser additions
+                            'llm_context': processed['llm_context'],
+                            'control_flow': json.dumps(processed['control_flow']),
+                            'paragraphs': json.dumps(processed['paragraphs']),
+                            'business_patterns': json.dumps(processed['business_patterns']),
+                        })
 
-                    # Resolve copybooks
-                    if copybook_resolver:
-                        enriched_content, resolved_copybooks = copybook_resolver.enrich_source(original_content)
-                        resolution_log = copybook_resolver.resolution_log.copy()
+                        logging.info(f"Enriched {file} (enhanced): {len(processed['resolved_copybooks'])} copybooks, "
+                                   f"~{processed['estimated_tokens']} tokens, "
+                                   f"{len(processed['paragraphs'])} paragraphs, "
+                                   f"{len(processed['control_flow'])} flow entries")
                     else:
-                        enriched_content = original_content
-                        resolved_copybooks = {}
-                        resolution_log = []
+                        # Legacy processing
+                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            original_content = f.read()
 
-                    # Estimate tokens
-                    estimated_tokens = len(enriched_content) // 4
+                        # Extract program name from source
+                        program_match = re.search(
+                            r'PROGRAM-ID\.\s*(\S+)',
+                            original_content,
+                            re.IGNORECASE
+                        )
+                        program_name = program_match.group(1).rstrip('.') if program_match else file.split('.')[0]
 
-                    enriched_files.append({
-                        'file_name': file,
-                        'file_path': file_path,
-                        'program_name': program_name,
-                        'original_content': original_content,
-                        'enriched_content': enriched_content,
-                        'resolved_copybooks': json.dumps(resolved_copybooks),
-                        'copybook_log': json.dumps(resolution_log),
-                        'line_count': len(enriched_content.split('\n')),
-                        'estimated_tokens': estimated_tokens,
-                        'needs_chunking': estimated_tokens > config["max_tokens_per_chunk"]
-                    })
+                        # Resolve copybooks
+                        if copybook_resolver:
+                            enriched_content, resolved_copybooks = copybook_resolver.enrich_source(original_content)
+                            resolution_log = copybook_resolver.resolution_log.copy()
+                        else:
+                            enriched_content = original_content
+                            resolved_copybooks = {}
+                            resolution_log = []
 
-                    logging.info(f"Enriched {file}: {len(resolved_copybooks)} copybooks, "
-                               f"~{estimated_tokens} tokens")
+                        # Estimate tokens
+                        estimated_tokens = len(enriched_content) // 4
+
+                        enriched_files.append({
+                            'file_name': file,
+                            'file_path': file_path,
+                            'program_name': program_name,
+                            'original_content': original_content,
+                            'enriched_content': enriched_content,
+                            'resolved_copybooks': json.dumps(resolved_copybooks),
+                            'copybook_log': json.dumps(resolution_log),
+                            'line_count': len(enriched_content.split('\n')),
+                            'estimated_tokens': estimated_tokens,
+                            'needs_chunking': estimated_tokens > config["max_tokens_per_chunk"],
+                            # Placeholders for enhanced fields (legacy mode)
+                            'llm_context': '',
+                            'control_flow': '[]',
+                            'paragraphs': '[]',
+                            'business_patterns': '[]',
+                        })
+
+                        logging.info(f"Enriched {file} (legacy): {len(resolved_copybooks)} copybooks, "
+                                   f"~{estimated_tokens} tokens")
 
                 except Exception as e:
                     logging.error(f"Failed to process {file_path}: {e}")
+                    import traceback
+                    traceback.print_exc()
 
     df = pd.DataFrame(enriched_files)
     logging.info(f"Loaded and enriched {len(df)} COBOL files")
@@ -1485,6 +1575,7 @@ def task_chunk_large_programs(**context) -> str:
     This addresses Defect #4 by:
     - Splitting programs exceeding token limits
     - Maintaining semantic boundaries (DIVISION/SECTION)
+    - Preserving DATA DIVISION context for PROCEDURE chunks (v3.0)
     """
     logging.info("Chunking large programs...")
     config = get_config()
@@ -1493,29 +1584,57 @@ def task_chunk_large_programs(**context) -> str:
     df_json = ti.xcom_pull(task_ids='load_and_enrich_files')
     df = pd.read_json(df_json, orient='records')
 
-    chunker = COBOLChunker(max_tokens_per_chunk=config["max_tokens_per_chunk"])
+    # Determine which chunker to use
+    use_enhanced = (
+        config.get("use_enhanced_parser", True) and
+        ENHANCED_PARSER_AVAILABLE and
+        config.get("preserve_data_context", True)
+    )
 
     chunked_data = []
 
     for _, row in df.iterrows():
         if row['needs_chunking']:
-            chunks = chunker.create_chunks(row['enriched_content'])
-            logging.info(f"{row['file_name']}: Split into {len(chunks)} chunks")
+            if use_enhanced:
+                # Use enhanced chunker with DATA context preservation
+                parser = EnhancedCOBOLParser(row['enriched_content'])
+                parser.parse()
+                chunker = EnhancedCOBOLChunker(parser, config["max_tokens_per_chunk"])
+                chunks = chunker.create_chunks()
 
-            for chunk_id, chunk_type, chunk_content in chunks:
-                chunked_data.append({
-                    **row.to_dict(),
-                    'chunk_id': chunk_id,
-                    'chunk_type': chunk_type,
-                    'chunk_content': chunk_content,
-                    'is_chunked': True
-                })
+                logging.info(f"{row['file_name']}: Split into {len(chunks)} chunks (enhanced)")
+
+                for chunk_id, chunk_type, chunk_content, data_context in chunks:
+                    chunked_data.append({
+                        **row.to_dict(),
+                        'chunk_id': chunk_id,
+                        'chunk_type': chunk_type,
+                        'chunk_content': chunk_content,
+                        'data_context': data_context,  # DATA DIVISION context for PROCEDURE
+                        'is_chunked': True
+                    })
+            else:
+                # Legacy chunker
+                chunker = COBOLChunker(max_tokens_per_chunk=config["max_tokens_per_chunk"])
+                chunks = chunker.create_chunks(row['enriched_content'])
+                logging.info(f"{row['file_name']}: Split into {len(chunks)} chunks (legacy)")
+
+                for chunk_id, chunk_type, chunk_content in chunks:
+                    chunked_data.append({
+                        **row.to_dict(),
+                        'chunk_id': chunk_id,
+                        'chunk_type': chunk_type,
+                        'chunk_content': chunk_content,
+                        'data_context': '',  # No data context in legacy mode
+                        'is_chunked': True
+                    })
         else:
             chunked_data.append({
                 **row.to_dict(),
                 'chunk_id': 'FULL',
                 'chunk_type': 'COMPLETE',
                 'chunk_content': row['enriched_content'],
+                'data_context': '',
                 'is_chunked': False
             })
 
@@ -1532,6 +1651,7 @@ def task_generate_overview_parallel(**context) -> str:
     Uses parallel processing for multiple files/chunks.
     Supports both RAGFlow (with knowledge base) and standard LLM modes.
     Addresses Defect #3 with business-focused prompts.
+    Injects pre-analysis context when enhanced parser is enabled (v3.0).
     """
     logging.info("Generating program overviews...")
     config = get_config()
@@ -1539,6 +1659,13 @@ def task_generate_overview_parallel(**context) -> str:
     ti = context['ti']
     df_json = ti.xcom_pull(task_ids='chunk_large_programs')
     df = pd.read_json(df_json, orient='records')
+
+    # Determine if we should inject pre-analysis context
+    inject_context = (
+        config.get("inject_preanalysis_context", True) and
+        ENHANCED_PARSER_AVAILABLE and
+        config.get("use_enhanced_parser", True)
+    )
 
     # Initialize RAGFlow client or LLM based on configuration
     use_ragflow = config.get("use_ragflow", False)
@@ -1558,11 +1685,19 @@ def task_generate_overview_parallel(**context) -> str:
         from src.config import get_llm
         llm = get_llm()
 
-    def process_chunk_with_ragflow(row, client):
+    def process_chunk_with_ragflow(row, client, use_enhanced_prompt):
         """Process a single chunk using RAGFlow."""
-        prompt = PROGRAM_OVERVIEW_PROMPT_V2.format(
-            cobol_code=row['chunk_content'][:30000]  # Safety limit
-        )
+        if use_enhanced_prompt and row.get('llm_context'):
+            # Use enhanced prompt with pre-analysis context
+            prompt = create_enhanced_overview_prompt(
+                cobol_code=row['chunk_content'][:30000],
+                llm_context=row.get('llm_context', ''),
+                data_context=row.get('data_context', '')
+            )
+        else:
+            prompt = PROGRAM_OVERVIEW_PROMPT_V2.format(
+                cobol_code=row['chunk_content'][:30000]
+            )
 
         try:
             response = client.chat_with_retry(prompt)
@@ -1571,16 +1706,26 @@ def task_generate_overview_parallel(**context) -> str:
             logging.error(f"RAGFlow overview generation failed for {row['file_name']}: {e}")
             return f"Error: {str(e)}"
 
-    def process_chunk_with_llm(row, llm_instance):
+    def process_chunk_with_llm(row, llm_instance, use_enhanced_prompt):
         """Process a single chunk using standard LLM."""
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        prompt = PROGRAM_OVERVIEW_PROMPT_V2.format(
-            cobol_code=row['chunk_content'][:30000]  # Safety limit
-        )
+        if use_enhanced_prompt and row.get('llm_context'):
+            # Use enhanced prompt with pre-analysis context
+            prompt = create_enhanced_overview_prompt(
+                cobol_code=row['chunk_content'][:30000],
+                llm_context=row.get('llm_context', ''),
+                data_context=row.get('data_context', '')
+            )
+            system_prompt = ENHANCED_SYSTEM_PROMPT
+        else:
+            prompt = PROGRAM_OVERVIEW_PROMPT_V2.format(
+                cobol_code=row['chunk_content'][:30000]
+            )
+            system_prompt = SYSTEM_PROMPT_EXPERT
 
         messages = [
-            SystemMessage(content=SYSTEM_PROMPT_EXPERT),
+            SystemMessage(content=system_prompt),
             HumanMessage(content=prompt)
         ]
 
@@ -1596,7 +1741,7 @@ def task_generate_overview_parallel(**context) -> str:
     if use_ragflow:
         # Sequential processing for RAGFlow to maintain session context
         for idx, row in df.iterrows():
-            result = process_chunk_with_ragflow(row, ragflow_client)
+            result = process_chunk_with_ragflow(row, ragflow_client, inject_context)
             results.append((idx, result))
         # Close RAGFlow session when done
         ragflow_client.close_session()
@@ -1604,7 +1749,7 @@ def task_generate_overview_parallel(**context) -> str:
         # Parallel processing for standard LLM
         with ThreadPoolExecutor(max_workers=config["parallel_workers"]) as executor:
             futures = {
-                executor.submit(process_chunk_with_llm, row, llm): idx
+                executor.submit(process_chunk_with_llm, row, llm, inject_context): idx
                 for idx, row in df.iterrows()
             }
 
@@ -1619,7 +1764,7 @@ def task_generate_overview_parallel(**context) -> str:
     results.sort(key=lambda x: x[0])
     df['program_overview'] = [r[1] for r in results]
 
-    logging.info("Program overview generation completed")
+    logging.info(f"Program overview generation completed (enhanced prompts: {inject_context})")
     return df.to_json(orient='records')
 
 
@@ -1628,6 +1773,7 @@ def task_generate_flowchart_parallel(**context) -> str:
     Task 4: Generate business-level flowcharts.
 
     Supports both RAGFlow (with knowledge base) and standard LLM modes.
+    Injects pre-analyzed control flow when enhanced parser is enabled (v3.0).
     """
     logging.info("Generating flowcharts...")
     config = get_config()
@@ -1635,6 +1781,13 @@ def task_generate_flowchart_parallel(**context) -> str:
     ti = context['ti']
     df_json = ti.xcom_pull(task_ids='generate_overview_parallel')
     df = pd.read_json(df_json, orient='records')
+
+    # Determine if we should inject pre-analysis context
+    inject_context = (
+        config.get("inject_preanalysis_context", True) and
+        ENHANCED_PARSER_AVAILABLE and
+        config.get("use_enhanced_parser", True)
+    )
 
     # Initialize RAGFlow client or LLM based on configuration
     use_ragflow = config.get("use_ragflow", False)
@@ -1654,15 +1807,24 @@ def task_generate_flowchart_parallel(**context) -> str:
         from src.config import get_llm
         llm = get_llm()
 
-    def process_chunk_with_ragflow(row, client):
+    def process_chunk_with_ragflow(row, client, use_enhanced_prompt):
         """Process a single chunk using RAGFlow."""
         # Only generate flowchart for PROCEDURE DIVISION chunks or full programs
         if row['chunk_type'] not in ['COMPLETE', 'PROCEDURE']:
             return "N/A - Not PROCEDURE DIVISION"
 
-        prompt = FLOWCHART_PROMPT_V2.format(
-            cobol_code=row['chunk_content'][:30000]
-        )
+        if use_enhanced_prompt and row.get('control_flow'):
+            # Use enhanced prompt with pre-analyzed control flow
+            control_flow = json.loads(row['control_flow']) if isinstance(row['control_flow'], str) else row['control_flow']
+            prompt = create_enhanced_flowchart_prompt(
+                cobol_code=row['chunk_content'][:30000],
+                control_flow=control_flow,
+                data_context=row.get('data_context', '')
+            )
+        else:
+            prompt = FLOWCHART_PROMPT_V2.format(
+                cobol_code=row['chunk_content'][:30000]
+            )
 
         try:
             response = client.chat_with_retry(prompt)
@@ -1671,7 +1833,7 @@ def task_generate_flowchart_parallel(**context) -> str:
             logging.error(f"RAGFlow flowchart generation failed for {row['file_name']}: {e}")
             return f"Error: {str(e)}"
 
-    def process_chunk_with_llm(row, llm_instance):
+    def process_chunk_with_llm(row, llm_instance, use_enhanced_prompt):
         """Process a single chunk using standard LLM."""
         from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -1679,12 +1841,23 @@ def task_generate_flowchart_parallel(**context) -> str:
         if row['chunk_type'] not in ['COMPLETE', 'PROCEDURE']:
             return "N/A - Not PROCEDURE DIVISION"
 
-        prompt = FLOWCHART_PROMPT_V2.format(
-            cobol_code=row['chunk_content'][:30000]
-        )
+        if use_enhanced_prompt and row.get('control_flow'):
+            # Use enhanced prompt with pre-analyzed control flow
+            control_flow = json.loads(row['control_flow']) if isinstance(row['control_flow'], str) else row['control_flow']
+            prompt = create_enhanced_flowchart_prompt(
+                cobol_code=row['chunk_content'][:30000],
+                control_flow=control_flow,
+                data_context=row.get('data_context', '')
+            )
+            system_prompt = ENHANCED_SYSTEM_PROMPT
+        else:
+            prompt = FLOWCHART_PROMPT_V2.format(
+                cobol_code=row['chunk_content'][:30000]
+            )
+            system_prompt = SYSTEM_PROMPT_EXPERT
 
         messages = [
-            SystemMessage(content=SYSTEM_PROMPT_EXPERT),
+            SystemMessage(content=system_prompt),
             HumanMessage(content=prompt)
         ]
 
@@ -1700,14 +1873,14 @@ def task_generate_flowchart_parallel(**context) -> str:
     if use_ragflow:
         # Sequential processing for RAGFlow
         for idx, row in df.iterrows():
-            result = process_chunk_with_ragflow(row, ragflow_client)
+            result = process_chunk_with_ragflow(row, ragflow_client, inject_context)
             results.append((idx, result))
         ragflow_client.close_session()
     else:
         # Parallel processing for standard LLM
         with ThreadPoolExecutor(max_workers=config["parallel_workers"]) as executor:
             futures = {
-                executor.submit(process_chunk_with_llm, row, llm): idx
+                executor.submit(process_chunk_with_llm, row, llm, inject_context): idx
                 for idx, row in df.iterrows()
             }
 
@@ -1721,7 +1894,7 @@ def task_generate_flowchart_parallel(**context) -> str:
     results.sort(key=lambda x: x[0])
     df['flowchart'] = [r[1] for r in results]
 
-    logging.info("Flowchart generation completed")
+    logging.info(f"Flowchart generation completed (enhanced prompts: {inject_context})")
     return df.to_json(orient='records')
 
 
@@ -2215,6 +2388,7 @@ def task_validate_summaries(**context) -> str:
     - Checking for hallucinated element names
     - Verifying mentioned paragraphs/sections exist
     - Calculating confidence scores
+    - Using enhanced validator with parsed structure when available (v3.0)
     """
     logging.info("Validating summaries...")
     config = get_config()
@@ -2229,15 +2403,15 @@ def task_validate_summaries(**context) -> str:
         logging.info("Validation skipped (disabled)")
         return df.to_json(orient='records')
 
+    # Determine if we should use enhanced validator
+    use_enhanced = (
+        config.get("use_enhanced_parser", True) and
+        ENHANCED_PARSER_AVAILABLE
+    )
+
     validation_results = []
 
     for idx, row in df.iterrows():
-        # Create validator
-        validator = SummaryValidator(
-            source=row['original_content'],
-            enriched_source=row['enriched_content']
-        )
-
         # Combine all generated content for validation
         combined_summary = f"""
 {row['program_overview']}
@@ -2253,26 +2427,64 @@ def task_validate_summaries(**context) -> str:
 {row.get('dependencies', '')}
 """
 
-        result = validator.validate_summary(combined_summary)
+        if use_enhanced:
+            # Use enhanced validator with parsed structure
+            try:
+                parser = EnhancedCOBOLParser(row['enriched_content'])
+                parser.parse()
+                validator = EnhancedSummaryValidator(
+                    parser=parser,
+                    original_source=row['original_content'],
+                    enriched_source=row['enriched_content']
+                )
+                result = validator.validate_summary(combined_summary)
 
-        validation_results.append({
-            'is_valid': result.is_valid,
-            'confidence_score': result.confidence_score,
-            'issues_count': len(result.issues),
-            'verified_count': len(result.verified_elements),
-            'hallucinated_count': len(result.hallucinated_elements),
-            'issues': json.dumps(result.issues[:10]),  # Limit for storage
-            'suggestions': json.dumps(result.suggestions)
-        })
+                validation_results.append({
+                    'is_valid': result.is_valid,
+                    'confidence_score': result.confidence_score,
+                    'issues_count': len(result.issues),
+                    'verified_count': len(result.verified_paragraphs) + len(result.verified_sections) + len(result.verified_files),
+                    'hallucinated_count': len(result.hallucinated_elements),
+                    'issues': json.dumps(result.issues[:10]),
+                    'suggestions': json.dumps(result.suggestions),
+                    'missing_important': json.dumps(result.missing_important_elements[:5])
+                })
 
-        logging.info(f"{row['file_name']}: Confidence={result.confidence_score:.2f}, "
-                    f"Valid={result.is_valid}, Issues={len(result.issues)}")
+                logging.info(f"{row['file_name']} (enhanced): Confidence={result.confidence_score:.2f}, "
+                           f"Valid={result.is_valid}, Issues={len(result.issues)}, "
+                           f"Hallucinations={len(result.hallucinated_elements)}")
+            except Exception as e:
+                logging.warning(f"Enhanced validation failed for {row['file_name']}: {e}. Falling back to legacy.")
+                use_enhanced = False
+
+        if not use_enhanced:
+            # Legacy validator
+            validator = SummaryValidator(
+                source=row['original_content'],
+                enriched_source=row['enriched_content']
+            )
+            result = validator.validate_summary(combined_summary)
+
+            validation_results.append({
+                'is_valid': result.is_valid,
+                'confidence_score': result.confidence_score,
+                'issues_count': len(result.issues),
+                'verified_count': len(result.verified_elements),
+                'hallucinated_count': len(result.hallucinated_elements),
+                'issues': json.dumps(result.issues[:10]),
+                'suggestions': json.dumps(result.suggestions),
+                'missing_important': '[]'
+            })
+
+            logging.info(f"{row['file_name']} (legacy): Confidence={result.confidence_score:.2f}, "
+                        f"Valid={result.is_valid}, Issues={len(result.issues)}")
 
     # Add validation results to dataframe
-    for key in validation_results[0].keys():
-        df[f'validation_{key}'] = [r[key] for r in validation_results]
+    if validation_results:
+        for key in validation_results[0].keys():
+            df[f'validation_{key}'] = [r[key] for r in validation_results]
 
-    logging.info("Validation completed")
+    logging.info(f"Validation completed (enhanced: {use_enhanced})")
     return df.to_json(orient='records')
 
 
@@ -2423,12 +2635,12 @@ default_args = {
 }
 
 with DAG(
-    dag_id='cobol_business_summary_v2',
+    dag_id='cobol_business_summary_v3',
     default_args=default_args,
-    description='COBOL Business Summary Generator - Enhanced with Copybook Resolution, RAGFlow Integration & Validation',
+    description='COBOL Business Summary Generator v3.0 - Enhanced with Column-Sensitive Parsing, Pre-Analysis Context, RAGFlow Integration & Validation',
     schedule_interval=None,
     catchup=False,
-    tags=['cobol', 'mainframe', 'modernization', 'documentation', 'v2', 'ragflow'],
+    tags=['cobol', 'mainframe', 'modernization', 'documentation', 'v3', 'ragflow', 'enhanced-parser'],
     doc_md=__doc__,
 ) as dag:
 
