@@ -98,6 +98,14 @@ from airflow.models import Variable
 
 import pandas as pd
 
+# RAGFlow SDK for RAG-based generation
+try:
+    from ragflow_sdk import RAGFlow
+    RAGFLOW_SDK_AVAILABLE = True
+except ImportError:
+    RAGFLOW_SDK_AVAILABLE = False
+    logging.warning("ragflow-sdk not installed. Install with: pip install ragflow-sdk")
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -111,6 +119,7 @@ DEFAULT_CONFIG = {
     "ragflow_api_base": "http://localhost:9380",
     "ragflow_api_key": "",
     "ragflow_chat_id": "",
+    "ragflow_chat_name": "",  # Alternative to chat_id - use chat assistant name
     "ragflow_similarity_threshold": 0.2,
     "ragflow_vector_weight": 0.3,
     "ragflow_top_n": 8,
@@ -127,6 +136,13 @@ DEFAULT_CONFIG = {
     # Validation Settings
     "min_confidence_threshold": 0.7,
     "enable_self_reflection": True,
+    # Generation Options - which sections to generate
+    "generate_overview": True,
+    "generate_flowchart": True,
+    "generate_io": True,
+    "generate_structure": True,  # Program Structure Analysis
+    "generate_core_logic": True,  # Detailed Core Logic with function list
+    "generate_dependencies": True,  # Copybooks and Called Programs
 }
 
 # ============================================================================
@@ -856,6 +872,233 @@ class SummaryValidator:
 
 
 # ============================================================================
+# RAGFlow Client (using ragflow-sdk)
+# ============================================================================
+
+class RAGFlowClient:
+    """
+    Client for RAGFlow Chat API using the official ragflow-sdk.
+
+    RAGFlow Chat automatically retrieves relevant content from configured
+    knowledge bases and generates enhanced responses using RAG.
+
+    Reference: https://www.ragflow.io/docs/python_api_reference
+    """
+
+    def __init__(
+        self,
+        api_base: str,
+        api_key: str,
+        chat_id: Optional[str] = None,
+        chat_name: Optional[str] = None,
+    ):
+        """
+        Initialize RAGFlow Client using the SDK.
+
+        Args:
+            api_base: RAGFlow API base URL (e.g., http://localhost:9380)
+            api_key: RAGFlow API key
+            chat_id: Chat Assistant ID (optional if chat_name is provided)
+            chat_name: Chat Assistant name (optional if chat_id is provided)
+        """
+        if not RAGFLOW_SDK_AVAILABLE:
+            raise ImportError(
+                "ragflow-sdk is not installed. Please install it with: pip install ragflow-sdk"
+            )
+
+        self.api_base = api_base.rstrip('/')
+        self.api_key = api_key
+        self.chat_id = chat_id
+        self.chat_name = chat_name
+
+        # Initialize RAGFlow SDK
+        self.rag = RAGFlow(api_key=api_key, base_url=api_base)
+        self._chat_assistant = None
+        self._session = None
+
+    def _get_chat_assistant(self):
+        """Get the chat assistant by ID or name."""
+        if self._chat_assistant is not None:
+            return self._chat_assistant
+
+        try:
+            if self.chat_id:
+                # Get by ID
+                assistants = self.rag.list_chats(id=self.chat_id)
+                if assistants:
+                    self._chat_assistant = assistants[0]
+                else:
+                    raise ValueError(f"Chat assistant with ID '{self.chat_id}' not found")
+            elif self.chat_name:
+                # Get by name
+                assistants = self.rag.list_chats(name=self.chat_name)
+                if assistants:
+                    self._chat_assistant = assistants[0]
+                else:
+                    raise ValueError(f"Chat assistant with name '{self.chat_name}' not found")
+            else:
+                raise ValueError("Either chat_id or chat_name must be provided")
+
+            logging.info(f"Connected to RAGFlow chat assistant: {self._chat_assistant.name if hasattr(self._chat_assistant, 'name') else self.chat_id}")
+            return self._chat_assistant
+
+        except Exception as e:
+            logging.error(f"Failed to get chat assistant: {e}")
+            raise
+
+    def create_session(self, name: Optional[str] = None) -> str:
+        """
+        Create a new chat session.
+
+        Args:
+            name: Session name (optional, auto-generated if not provided)
+
+        Returns:
+            Session ID
+        """
+        assistant = self._get_chat_assistant()
+        session_name = name or f"COBOL Analysis {datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        try:
+            self._session = assistant.create_session(name=session_name)
+            session_id = self._session.id if hasattr(self._session, 'id') else str(self._session)
+            logging.info(f"Created RAGFlow session: {session_id}")
+            return session_id
+        except Exception as e:
+            logging.error(f"Failed to create session: {e}")
+            raise
+
+    def chat(
+        self,
+        question: str,
+        stream: bool = False,
+        create_new_session: bool = False
+    ) -> str:
+        """
+        Send a message to RAGFlow Chat and get response with RAG.
+
+        The RAGFlow Chat will automatically:
+        1. Retrieve relevant content from knowledge base
+        2. Inject retrieved content into the prompt
+        3. Generate response using the LLM
+
+        Args:
+            question: User question/prompt to send
+            stream: Whether to use streaming response (default: False)
+            create_new_session: Whether to create a new session for this chat
+
+        Returns:
+            LLM response text
+        """
+        # Ensure we have a session
+        if self._session is None or create_new_session:
+            self.create_session()
+
+        try:
+            if stream:
+                # Streaming response
+                response_content = []
+                for message in self._session.ask(question=question, stream=True):
+                    if hasattr(message, 'content') and message.content:
+                        response_content.append(message.content)
+                return ''.join(response_content)
+            else:
+                # Non-streaming response
+                message = self._session.ask(question=question, stream=False)
+                if hasattr(message, 'content'):
+                    return message.content
+                return str(message)
+
+        except Exception as e:
+            logging.error(f"RAGFlow chat failed: {e}")
+            return f"Error: {str(e)}"
+
+    def chat_with_retry(
+        self,
+        question: str,
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
+        stream: bool = False
+    ) -> str:
+        """
+        Send message with automatic retry on failure.
+
+        Args:
+            question: User question to send
+            max_retries: Maximum number of retry attempts
+            retry_delay: Delay between retries in seconds
+            stream: Whether to use streaming response
+
+        Returns:
+            LLM response text
+        """
+        last_error = None
+
+        for attempt in range(max_retries):
+            try:
+                response = self.chat(question, stream=stream)
+                if not response.startswith("Error:"):
+                    return response
+                last_error = response
+            except Exception as e:
+                last_error = str(e)
+                logging.warning(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
+
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))
+                # Create a new session on retry
+                self._session = None
+
+        return f"Failed after {max_retries} attempts. Last error: {last_error}"
+
+    def close_session(self):
+        """Close the current session."""
+        if self._session is not None:
+            try:
+                assistant = self._get_chat_assistant()
+                session_id = self._session.id if hasattr(self._session, 'id') else None
+                if session_id:
+                    assistant.delete_sessions(ids=[session_id])
+                    logging.info(f"Closed RAGFlow session: {session_id}")
+            except Exception as e:
+                logging.warning(f"Failed to close session: {e}")
+            finally:
+                self._session = None
+
+
+def create_ragflow_client(config: dict) -> RAGFlowClient:
+    """
+    Create RAGFlow Client for RAG-based generation.
+
+    Args:
+        config: Configuration dictionary
+
+    Returns:
+        RAGFlowClient instance
+    """
+    if not config.get("ragflow_api_key"):
+        raise ValueError(
+            "RAGFlow requires RAGFLOW_API_KEY to be set. "
+            "Please configure this in Airflow Variables or environment variables."
+        )
+
+    chat_id = config.get("ragflow_chat_id")
+    chat_name = config.get("ragflow_chat_name")
+
+    if not chat_id and not chat_name:
+        raise ValueError(
+            "RAGFlow requires either RAGFLOW_CHAT_ID or RAGFLOW_CHAT_NAME to be set."
+        )
+
+    return RAGFlowClient(
+        api_base=config["ragflow_api_base"],
+        api_key=config["ragflow_api_key"],
+        chat_id=chat_id,
+        chat_name=chat_name,
+    )
+
+
+# ============================================================================
 # Prompt Templates (Enhanced)
 # ============================================================================
 
@@ -980,6 +1223,122 @@ Provide a brief validation report with:
 - Potential errors or hallucinations
 - Suggested corrections"""
 
+# Additional prompts from Cobol_Summary_11Nov.json (config.json Prompt_4, 5, 6)
+
+PROGRAM_STRUCTURE_PROMPT = """Analyze this COBOL program and provide a detailed Program Structure Analysis.
+
+## Required Output Format:
+
+## 4. Program Structure Analysis
+
+* **IDENTIFICATION DIVISION**: Metadata information of the program, such as author, date, program name, etc.
+* **ENVIRONMENT DIVISION**: Describes the program's runtime environment, especially FILE-CONTROL related to files.
+* **DATA DIVISION**:
+    * **FILE SECTION**: Defines input/output files (FD) used by the program and their record layouts.
+    * **WORKING-STORAGE SECTION**: Describes key variables, flags, counters, and data structures used internally in the program.
+    * **LINKAGE SECTION**: (if present) Describes parameters passed to/from this program.
+* **PROCEDURE DIVISION**: The core logic of the program, describing major paragraphs/sections and their functions.
+
+COBOL Source Code:
+```cobol
+{cobol_code}
+```"""
+
+CORE_LOGIC_PROMPT = """Analyze this COBOL program's PROCEDURE DIVISION and provide detailed core logic documentation.
+
+## Instructions:
+1. First, list out ALL functions by looking for PERFORM statements in PROCEDURE DIVISION in logical order.
+   Provide the line number for each function. Do not miss any PERFORM in the PROCEDURE DIVISION.
+2. If a function calls another sub-function, list all sub-functions being called.
+3. For each function, provide:
+   - A Mermaid flowchart showing the logic flow
+   - Detailed steps (minimum 150 words per function)
+   - Validation rules, default values, and error handling must be clearly stated
+
+## Required Output Format:
+
+## 5. Detailed Core Logic
+
+* **Function List**:
+    * `[Function 1]`: From Line [XXX] to line [XXX]. [Function 1] is calling [Sub-function 1]
+    * `[Function 2]`: From Line [XXX] to line [XXX].
+    * `[Sub-function 1]`: From Line [XXX] to line [XXX]. [Sub-function 1] is calling [Sub-function 2]
+    * `[Sub-function 2]`: From Line [XXX] to line [XXX].
+
+* **`[Function 1]`**:
+```mermaid
+graph TD
+    [flowchart for Function 1]
+```
+    * Step 1: [Detailed description of step 1]
+    * Step 2: [Detailed description of step 2]
+    * ...
+
+* **`[Function 2]`**:
+```mermaid
+graph TD
+    [flowchart for Function 2]
+```
+    * Step 1: [Detailed description of step 1]
+    * Step 2: [Detailed description of step 2]
+    * ...
+
+COBOL Source Code:
+```cobol
+{cobol_code}
+```"""
+
+DEPENDENCIES_PROMPT = """Analyze this COBOL program and identify all dependencies.
+
+## Instructions:
+1. For Copybooks: Look for all COPY statements in the code
+2. For Called Programs: Look for all CALL statements in the code
+3. Do not miss any COPY or CALL statement
+
+## Required Output Format:
+
+## 6. Dependencies
+
+* **Copybooks**:
+    * `COPY '[COPYBOOK1]'`: [Briefly explain the purpose of this copybook, e.g., record definitions, constants, common routines]
+    * `COPY '[COPYBOOK2]'`: [Briefly explain the purpose of this copybook]
+    * ...
+
+* **Called Programs**:
+    * `CALL '[SUBPROG1]'`: [Briefly explain the purpose of calling this subroutine]
+    * `CALL '[SUBPROG2]'`: [Briefly explain the purpose of calling this subroutine]
+    * ...
+
+If no copybooks or called programs are found, explicitly state "None found in this program."
+
+COBOL Source Code:
+```cobol
+{cobol_code}
+```"""
+
+# RAGFlow-specific system prompt with knowledge base placeholder
+RAGFLOW_SYSTEM_PROMPT = """# Role
+You are a professional business analyst with more than 20-year experience in a world class software development company.
+Having technical user from the bank as the audience of your documentation.
+The bank is now requesting you to write a technical specification document on the cobol code they provide.
+Please provide information in a business formal, technical and professional style.
+Please write in a concise and informative tone.
+By referring to the knowledge base in the manual dataset, it gives you a better understanding of the cobol structure and definition.
+
+Here is the knowledge base:
+{knowledge}
+The above is the knowledge base.
+
+# Task
+Your primary task is to analyze the COBOL code file provided by the user and generate a comprehensive, structured Markdown technical document.
+User may ask you specific question regarding the cobol file, answer the question based on the understanding of the file.
+
+# Constraints and Limitations
+* **Adhere to Original Text**: All explanations and analyses must strictly be based on the provided COBOL code; do not guess or add functionalities not present in the code.
+* **Professional Terminology**: Use professional and accurate terminology while ensuring clarity.
+* **Language**: Conduct analysis and documentation writing in English.
+* **Format**: Strictly follow the defined Markdown output format, without omitting any part."""
+
 
 # ============================================================================
 # Airflow Task Functions (Optimized)
@@ -999,6 +1358,7 @@ def get_config() -> dict:
         config["ragflow_api_base"] = Variable.get("RAGFLOW_HOST", default_var=config["ragflow_api_base"])
         config["ragflow_api_key"] = Variable.get("RAGFLOW_API_KEY", default_var="")
         config["ragflow_chat_id"] = Variable.get("RAGFLOW_CHAT_ID", default_var="")
+        config["ragflow_chat_name"] = Variable.get("RAGFLOW_CHAT_NAME", default_var="")
 
         # Directories
         config["cobol_input_dir"] = Variable.get("COBOL_INPUT_DIR", default_var=config["cobol_input_dir"])
@@ -1017,6 +1377,14 @@ def get_config() -> dict:
         ).lower() == "true"
         config["use_ragflow"] = Variable.get("USE_RAGFLOW", default_var="false").lower() == "true"
 
+        # Generation flags
+        config["generate_overview"] = Variable.get("GENERATE_OVERVIEW", default_var="true").lower() == "true"
+        config["generate_flowchart"] = Variable.get("GENERATE_FLOWCHART", default_var="true").lower() == "true"
+        config["generate_io"] = Variable.get("GENERATE_IO", default_var="true").lower() == "true"
+        config["generate_structure"] = Variable.get("GENERATE_STRUCTURE", default_var="true").lower() == "true"
+        config["generate_core_logic"] = Variable.get("GENERATE_CORE_LOGIC", default_var="true").lower() == "true"
+        config["generate_dependencies"] = Variable.get("GENERATE_DEPENDENCIES", default_var="true").lower() == "true"
+
     except Exception:
         # Fallback to environment variables
         config["llm_base_url"] = os.getenv("LLM_BASE_URL", config["llm_base_url"])
@@ -1024,6 +1392,13 @@ def get_config() -> dict:
         config["llm_model_name"] = os.getenv("LLM_MODEL_NAME", config["llm_model_name"])
         config["cobol_input_dir"] = os.getenv("COBOL_INPUT_DIR", config["cobol_input_dir"])
         config["cobol_output_dir"] = os.getenv("COBOL_OUTPUT_DIR", config["cobol_output_dir"])
+
+        # RAGFlow from environment
+        config["ragflow_api_base"] = os.getenv("RAGFLOW_HOST", config["ragflow_api_base"])
+        config["ragflow_api_key"] = os.getenv("RAGFLOW_API_KEY", "")
+        config["ragflow_chat_id"] = os.getenv("RAGFLOW_CHAT_ID", "")
+        config["ragflow_chat_name"] = os.getenv("RAGFLOW_CHAT_NAME", "")
+        config["use_ragflow"] = os.getenv("USE_RAGFLOW", "false").lower() == "true"
 
     return config
 
@@ -1155,10 +1530,9 @@ def task_generate_overview_parallel(**context) -> str:
     Task 3: Generate program overviews with enhanced prompts.
 
     Uses parallel processing for multiple files/chunks.
+    Supports both RAGFlow (with knowledge base) and standard LLM modes.
     Addresses Defect #3 with business-focused prompts.
     """
-    from src.config import get_llm
-
     logging.info("Generating program overviews...")
     config = get_config()
 
@@ -1166,10 +1540,39 @@ def task_generate_overview_parallel(**context) -> str:
     df_json = ti.xcom_pull(task_ids='chunk_large_programs')
     df = pd.read_json(df_json, orient='records')
 
-    llm = get_llm()
+    # Initialize RAGFlow client or LLM based on configuration
+    use_ragflow = config.get("use_ragflow", False)
+    ragflow_client = None
+    llm = None
 
-    def process_chunk(row):
-        """Process a single chunk."""
+    if use_ragflow:
+        logging.info("Using RAGFlow Chat with knowledge base for overview generation")
+        try:
+            ragflow_client = create_ragflow_client(config)
+        except Exception as e:
+            logging.warning(f"Failed to create RAGFlow client: {e}. Falling back to LLM.")
+            use_ragflow = False
+
+    if not use_ragflow:
+        logging.info("Using standard LLM for overview generation")
+        from src.config import get_llm
+        llm = get_llm()
+
+    def process_chunk_with_ragflow(row, client):
+        """Process a single chunk using RAGFlow."""
+        prompt = PROGRAM_OVERVIEW_PROMPT_V2.format(
+            cobol_code=row['chunk_content'][:30000]  # Safety limit
+        )
+
+        try:
+            response = client.chat_with_retry(prompt)
+            return response
+        except Exception as e:
+            logging.error(f"RAGFlow overview generation failed for {row['file_name']}: {e}")
+            return f"Error: {str(e)}"
+
+    def process_chunk_with_llm(row, llm_instance):
+        """Process a single chunk using standard LLM."""
         from langchain_core.messages import HumanMessage, SystemMessage
 
         prompt = PROGRAM_OVERVIEW_PROMPT_V2.format(
@@ -1182,26 +1585,35 @@ def task_generate_overview_parallel(**context) -> str:
         ]
 
         try:
-            response = llm.invoke(messages)
+            response = llm_instance.invoke(messages)
             return response.content
         except Exception as e:
-            logging.error(f"Overview generation failed for {row['file_name']}: {e}")
+            logging.error(f"LLM overview generation failed for {row['file_name']}: {e}")
             return f"Error: {str(e)}"
 
-    # Process with thread pool for parallelism
+    # Process chunks
     results = []
-    with ThreadPoolExecutor(max_workers=config["parallel_workers"]) as executor:
-        futures = {
-            executor.submit(process_chunk, row): idx
-            for idx, row in df.iterrows()
-        }
+    if use_ragflow:
+        # Sequential processing for RAGFlow to maintain session context
+        for idx, row in df.iterrows():
+            result = process_chunk_with_ragflow(row, ragflow_client)
+            results.append((idx, result))
+        # Close RAGFlow session when done
+        ragflow_client.close_session()
+    else:
+        # Parallel processing for standard LLM
+        with ThreadPoolExecutor(max_workers=config["parallel_workers"]) as executor:
+            futures = {
+                executor.submit(process_chunk_with_llm, row, llm): idx
+                for idx, row in df.iterrows()
+            }
 
-        for future in as_completed(futures):
-            idx = futures[future]
-            try:
-                results.append((idx, future.result()))
-            except Exception as e:
-                results.append((idx, f"Error: {str(e)}"))
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    results.append((idx, future.result()))
+                except Exception as e:
+                    results.append((idx, f"Error: {str(e)}"))
 
     # Sort by original index and apply
     results.sort(key=lambda x: x[0])
@@ -1214,9 +1626,9 @@ def task_generate_overview_parallel(**context) -> str:
 def task_generate_flowchart_parallel(**context) -> str:
     """
     Task 4: Generate business-level flowcharts.
-    """
-    from src.config import get_llm
 
+    Supports both RAGFlow (with knowledge base) and standard LLM modes.
+    """
     logging.info("Generating flowcharts...")
     config = get_config()
 
@@ -1224,9 +1636,43 @@ def task_generate_flowchart_parallel(**context) -> str:
     df_json = ti.xcom_pull(task_ids='generate_overview_parallel')
     df = pd.read_json(df_json, orient='records')
 
-    llm = get_llm()
+    # Initialize RAGFlow client or LLM based on configuration
+    use_ragflow = config.get("use_ragflow", False)
+    ragflow_client = None
+    llm = None
 
-    def process_chunk(row):
+    if use_ragflow:
+        logging.info("Using RAGFlow Chat with knowledge base for flowchart generation")
+        try:
+            ragflow_client = create_ragflow_client(config)
+        except Exception as e:
+            logging.warning(f"Failed to create RAGFlow client: {e}. Falling back to LLM.")
+            use_ragflow = False
+
+    if not use_ragflow:
+        logging.info("Using standard LLM for flowchart generation")
+        from src.config import get_llm
+        llm = get_llm()
+
+    def process_chunk_with_ragflow(row, client):
+        """Process a single chunk using RAGFlow."""
+        # Only generate flowchart for PROCEDURE DIVISION chunks or full programs
+        if row['chunk_type'] not in ['COMPLETE', 'PROCEDURE']:
+            return "N/A - Not PROCEDURE DIVISION"
+
+        prompt = FLOWCHART_PROMPT_V2.format(
+            cobol_code=row['chunk_content'][:30000]
+        )
+
+        try:
+            response = client.chat_with_retry(prompt)
+            return response
+        except Exception as e:
+            logging.error(f"RAGFlow flowchart generation failed for {row['file_name']}: {e}")
+            return f"Error: {str(e)}"
+
+    def process_chunk_with_llm(row, llm_instance):
+        """Process a single chunk using standard LLM."""
         from langchain_core.messages import HumanMessage, SystemMessage
 
         # Only generate flowchart for PROCEDURE DIVISION chunks or full programs
@@ -1243,25 +1689,34 @@ def task_generate_flowchart_parallel(**context) -> str:
         ]
 
         try:
-            response = llm.invoke(messages)
+            response = llm_instance.invoke(messages)
             return response.content
         except Exception as e:
-            logging.error(f"Flowchart generation failed for {row['file_name']}: {e}")
+            logging.error(f"LLM flowchart generation failed for {row['file_name']}: {e}")
             return f"Error: {str(e)}"
 
+    # Process chunks
     results = []
-    with ThreadPoolExecutor(max_workers=config["parallel_workers"]) as executor:
-        futures = {
-            executor.submit(process_chunk, row): idx
-            for idx, row in df.iterrows()
-        }
+    if use_ragflow:
+        # Sequential processing for RAGFlow
+        for idx, row in df.iterrows():
+            result = process_chunk_with_ragflow(row, ragflow_client)
+            results.append((idx, result))
+        ragflow_client.close_session()
+    else:
+        # Parallel processing for standard LLM
+        with ThreadPoolExecutor(max_workers=config["parallel_workers"]) as executor:
+            futures = {
+                executor.submit(process_chunk_with_llm, row, llm): idx
+                for idx, row in df.iterrows()
+            }
 
-        for future in as_completed(futures):
-            idx = futures[future]
-            try:
-                results.append((idx, future.result()))
-            except Exception as e:
-                results.append((idx, f"Error: {str(e)}"))
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    results.append((idx, future.result()))
+                except Exception as e:
+                    results.append((idx, f"Error: {str(e)}"))
 
     results.sort(key=lambda x: x[0])
     df['flowchart'] = [r[1] for r in results]
@@ -1273,9 +1728,9 @@ def task_generate_flowchart_parallel(**context) -> str:
 def task_generate_io_parallel(**context) -> str:
     """
     Task 5: Generate Input/Output documentation.
-    """
-    from src.config import get_llm
 
+    Supports both RAGFlow (with knowledge base) and standard LLM modes.
+    """
     logging.info("Generating I/O documentation...")
     config = get_config()
 
@@ -1283,9 +1738,39 @@ def task_generate_io_parallel(**context) -> str:
     df_json = ti.xcom_pull(task_ids='generate_flowchart_parallel')
     df = pd.read_json(df_json, orient='records')
 
-    llm = get_llm()
+    # Initialize RAGFlow client or LLM based on configuration
+    use_ragflow = config.get("use_ragflow", False)
+    ragflow_client = None
+    llm = None
 
-    def process_chunk(row):
+    if use_ragflow:
+        logging.info("Using RAGFlow Chat with knowledge base for I/O generation")
+        try:
+            ragflow_client = create_ragflow_client(config)
+        except Exception as e:
+            logging.warning(f"Failed to create RAGFlow client: {e}. Falling back to LLM.")
+            use_ragflow = False
+
+    if not use_ragflow:
+        logging.info("Using standard LLM for I/O generation")
+        from src.config import get_llm
+        llm = get_llm()
+
+    def process_chunk_with_ragflow(row, client):
+        """Process a single chunk using RAGFlow."""
+        prompt = INPUT_OUTPUT_PROMPT_V2.format(
+            cobol_code=row['chunk_content'][:30000]
+        )
+
+        try:
+            response = client.chat_with_retry(prompt)
+            return response
+        except Exception as e:
+            logging.error(f"RAGFlow I/O generation failed for {row['file_name']}: {e}")
+            return f"Error: {str(e)}"
+
+    def process_chunk_with_llm(row, llm_instance):
+        """Process a single chunk using standard LLM."""
         from langchain_core.messages import HumanMessage, SystemMessage
 
         prompt = INPUT_OUTPUT_PROMPT_V2.format(
@@ -1298,25 +1783,34 @@ def task_generate_io_parallel(**context) -> str:
         ]
 
         try:
-            response = llm.invoke(messages)
+            response = llm_instance.invoke(messages)
             return response.content
         except Exception as e:
-            logging.error(f"I/O generation failed for {row['file_name']}: {e}")
+            logging.error(f"LLM I/O generation failed for {row['file_name']}: {e}")
             return f"Error: {str(e)}"
 
+    # Process chunks
     results = []
-    with ThreadPoolExecutor(max_workers=config["parallel_workers"]) as executor:
-        futures = {
-            executor.submit(process_chunk, row): idx
-            for idx, row in df.iterrows()
-        }
+    if use_ragflow:
+        # Sequential processing for RAGFlow
+        for idx, row in df.iterrows():
+            result = process_chunk_with_ragflow(row, ragflow_client)
+            results.append((idx, result))
+        ragflow_client.close_session()
+    else:
+        # Parallel processing for standard LLM
+        with ThreadPoolExecutor(max_workers=config["parallel_workers"]) as executor:
+            futures = {
+                executor.submit(process_chunk_with_llm, row, llm): idx
+                for idx, row in df.iterrows()
+            }
 
-        for future in as_completed(futures):
-            idx = futures[future]
-            try:
-                results.append((idx, future.result()))
-            except Exception as e:
-                results.append((idx, f"Error: {str(e)}"))
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    results.append((idx, future.result()))
+                except Exception as e:
+                    results.append((idx, f"Error: {str(e)}"))
 
     results.sort(key=lambda x: x[0])
     df['input_output'] = [r[1] for r in results]
@@ -1325,14 +1819,330 @@ def task_generate_io_parallel(**context) -> str:
     return df.to_json(orient='records')
 
 
+def task_generate_structure_parallel(**context) -> str:
+    """
+    Task 5b: Generate Program Structure Analysis.
+
+    Analyzes the COBOL program structure including IDENTIFICATION, ENVIRONMENT,
+    DATA, and PROCEDURE divisions.
+    Supports both RAGFlow (with knowledge base) and standard LLM modes.
+    """
+    logging.info("Generating Program Structure Analysis...")
+    config = get_config()
+
+    ti = context['ti']
+    df_json = ti.xcom_pull(task_ids='generate_io_parallel')
+    df = pd.read_json(df_json, orient='records')
+
+    # Check if structure generation is enabled
+    if not config.get("generate_structure", True):
+        df['program_structure'] = "N/A - Structure generation disabled"
+        logging.info("Structure generation skipped (disabled)")
+        return df.to_json(orient='records')
+
+    # Initialize RAGFlow client or LLM based on configuration
+    use_ragflow = config.get("use_ragflow", False)
+    ragflow_client = None
+    llm = None
+
+    if use_ragflow:
+        logging.info("Using RAGFlow Chat with knowledge base for structure generation")
+        try:
+            ragflow_client = create_ragflow_client(config)
+        except Exception as e:
+            logging.warning(f"Failed to create RAGFlow client: {e}. Falling back to LLM.")
+            use_ragflow = False
+
+    if not use_ragflow:
+        logging.info("Using standard LLM for structure generation")
+        from src.config import get_llm
+        llm = get_llm()
+
+    def process_chunk_with_ragflow(row, client):
+        """Process a single chunk using RAGFlow."""
+        prompt = PROGRAM_STRUCTURE_PROMPT.format(
+            cobol_code=row['chunk_content'][:30000]
+        )
+
+        try:
+            response = client.chat_with_retry(prompt)
+            return response
+        except Exception as e:
+            logging.error(f"RAGFlow structure generation failed for {row['file_name']}: {e}")
+            return f"Error: {str(e)}"
+
+    def process_chunk_with_llm(row, llm_instance):
+        """Process a single chunk using standard LLM."""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        prompt = PROGRAM_STRUCTURE_PROMPT.format(
+            cobol_code=row['chunk_content'][:30000]
+        )
+
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT_EXPERT),
+            HumanMessage(content=prompt)
+        ]
+
+        try:
+            response = llm_instance.invoke(messages)
+            return response.content
+        except Exception as e:
+            logging.error(f"LLM structure generation failed for {row['file_name']}: {e}")
+            return f"Error: {str(e)}"
+
+    # Process chunks
+    results = []
+    if use_ragflow:
+        # Sequential processing for RAGFlow
+        for idx, row in df.iterrows():
+            result = process_chunk_with_ragflow(row, ragflow_client)
+            results.append((idx, result))
+        ragflow_client.close_session()
+    else:
+        # Parallel processing for standard LLM
+        with ThreadPoolExecutor(max_workers=config["parallel_workers"]) as executor:
+            futures = {
+                executor.submit(process_chunk_with_llm, row, llm): idx
+                for idx, row in df.iterrows()
+            }
+
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    results.append((idx, future.result()))
+                except Exception as e:
+                    results.append((idx, f"Error: {str(e)}"))
+
+    results.sort(key=lambda x: x[0])
+    df['program_structure'] = [r[1] for r in results]
+
+    logging.info("Program Structure Analysis generation completed")
+    return df.to_json(orient='records')
+
+
+def task_generate_core_logic_parallel(**context) -> str:
+    """
+    Task 5c: Generate Detailed Core Logic documentation.
+
+    Lists all functions/paragraphs with line numbers, flowcharts,
+    and detailed step descriptions for each.
+    Supports both RAGFlow (with knowledge base) and standard LLM modes.
+    """
+    logging.info("Generating Detailed Core Logic...")
+    config = get_config()
+
+    ti = context['ti']
+    df_json = ti.xcom_pull(task_ids='generate_structure_parallel')
+    df = pd.read_json(df_json, orient='records')
+
+    # Check if core logic generation is enabled
+    if not config.get("generate_core_logic", True):
+        df['core_logic'] = "N/A - Core logic generation disabled"
+        logging.info("Core logic generation skipped (disabled)")
+        return df.to_json(orient='records')
+
+    # Initialize RAGFlow client or LLM based on configuration
+    use_ragflow = config.get("use_ragflow", False)
+    ragflow_client = None
+    llm = None
+
+    if use_ragflow:
+        logging.info("Using RAGFlow Chat with knowledge base for core logic generation")
+        try:
+            ragflow_client = create_ragflow_client(config)
+        except Exception as e:
+            logging.warning(f"Failed to create RAGFlow client: {e}. Falling back to LLM.")
+            use_ragflow = False
+
+    if not use_ragflow:
+        logging.info("Using standard LLM for core logic generation")
+        from src.config import get_llm
+        llm = get_llm()
+
+    def process_chunk_with_ragflow(row, client):
+        """Process a single chunk using RAGFlow."""
+        # Only generate core logic for PROCEDURE DIVISION chunks or full programs
+        if row['chunk_type'] not in ['COMPLETE', 'PROCEDURE']:
+            return "N/A - Not PROCEDURE DIVISION"
+
+        prompt = CORE_LOGIC_PROMPT.format(
+            cobol_code=row['chunk_content'][:30000]
+        )
+
+        try:
+            response = client.chat_with_retry(prompt)
+            return response
+        except Exception as e:
+            logging.error(f"RAGFlow core logic generation failed for {row['file_name']}: {e}")
+            return f"Error: {str(e)}"
+
+    def process_chunk_with_llm(row, llm_instance):
+        """Process a single chunk using standard LLM."""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        # Only generate core logic for PROCEDURE DIVISION chunks or full programs
+        if row['chunk_type'] not in ['COMPLETE', 'PROCEDURE']:
+            return "N/A - Not PROCEDURE DIVISION"
+
+        prompt = CORE_LOGIC_PROMPT.format(
+            cobol_code=row['chunk_content'][:30000]
+        )
+
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT_EXPERT),
+            HumanMessage(content=prompt)
+        ]
+
+        try:
+            response = llm_instance.invoke(messages)
+            return response.content
+        except Exception as e:
+            logging.error(f"LLM core logic generation failed for {row['file_name']}: {e}")
+            return f"Error: {str(e)}"
+
+    # Process chunks
+    results = []
+    if use_ragflow:
+        # Sequential processing for RAGFlow
+        for idx, row in df.iterrows():
+            result = process_chunk_with_ragflow(row, ragflow_client)
+            results.append((idx, result))
+        ragflow_client.close_session()
+    else:
+        # Parallel processing for standard LLM
+        with ThreadPoolExecutor(max_workers=config["parallel_workers"]) as executor:
+            futures = {
+                executor.submit(process_chunk_with_llm, row, llm): idx
+                for idx, row in df.iterrows()
+            }
+
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    results.append((idx, future.result()))
+                except Exception as e:
+                    results.append((idx, f"Error: {str(e)}"))
+
+    results.sort(key=lambda x: x[0])
+    df['core_logic'] = [r[1] for r in results]
+
+    logging.info("Detailed Core Logic generation completed")
+    return df.to_json(orient='records')
+
+
+def task_generate_dependencies_parallel(**context) -> str:
+    """
+    Task 5d: Generate Dependencies documentation.
+
+    Lists all COPY statements (copybooks) and CALL statements (called programs).
+    Supports both RAGFlow (with knowledge base) and standard LLM modes.
+    """
+    logging.info("Generating Dependencies documentation...")
+    config = get_config()
+
+    ti = context['ti']
+    df_json = ti.xcom_pull(task_ids='generate_core_logic_parallel')
+    df = pd.read_json(df_json, orient='records')
+
+    # Check if dependencies generation is enabled
+    if not config.get("generate_dependencies", True):
+        df['dependencies'] = "N/A - Dependencies generation disabled"
+        logging.info("Dependencies generation skipped (disabled)")
+        return df.to_json(orient='records')
+
+    # Initialize RAGFlow client or LLM based on configuration
+    use_ragflow = config.get("use_ragflow", False)
+    ragflow_client = None
+    llm = None
+
+    if use_ragflow:
+        logging.info("Using RAGFlow Chat with knowledge base for dependencies generation")
+        try:
+            ragflow_client = create_ragflow_client(config)
+        except Exception as e:
+            logging.warning(f"Failed to create RAGFlow client: {e}. Falling back to LLM.")
+            use_ragflow = False
+
+    if not use_ragflow:
+        logging.info("Using standard LLM for dependencies generation")
+        from src.config import get_llm
+        llm = get_llm()
+
+    def process_chunk_with_ragflow(row, client):
+        """Process a single chunk using RAGFlow."""
+        prompt = DEPENDENCIES_PROMPT.format(
+            cobol_code=row['chunk_content'][:30000]
+        )
+
+        try:
+            response = client.chat_with_retry(prompt)
+            return response
+        except Exception as e:
+            logging.error(f"RAGFlow dependencies generation failed for {row['file_name']}: {e}")
+            return f"Error: {str(e)}"
+
+    def process_chunk_with_llm(row, llm_instance):
+        """Process a single chunk using standard LLM."""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        prompt = DEPENDENCIES_PROMPT.format(
+            cobol_code=row['chunk_content'][:30000]
+        )
+
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT_EXPERT),
+            HumanMessage(content=prompt)
+        ]
+
+        try:
+            response = llm_instance.invoke(messages)
+            return response.content
+        except Exception as e:
+            logging.error(f"LLM dependencies generation failed for {row['file_name']}: {e}")
+            return f"Error: {str(e)}"
+
+    # Process chunks
+    results = []
+    if use_ragflow:
+        # Sequential processing for RAGFlow
+        for idx, row in df.iterrows():
+            result = process_chunk_with_ragflow(row, ragflow_client)
+            results.append((idx, result))
+        ragflow_client.close_session()
+    else:
+        # Parallel processing for standard LLM
+        with ThreadPoolExecutor(max_workers=config["parallel_workers"]) as executor:
+            futures = {
+                executor.submit(process_chunk_with_llm, row, llm): idx
+                for idx, row in df.iterrows()
+            }
+
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    results.append((idx, future.result()))
+                except Exception as e:
+                    results.append((idx, f"Error: {str(e)}"))
+
+    results.sort(key=lambda x: x[0])
+    df['dependencies'] = [r[1] for r in results]
+
+    logging.info("Dependencies documentation generation completed")
+    return df.to_json(orient='records')
+
+
 def task_aggregate_chunks(**context) -> str:
     """
     Task 6: Aggregate chunked results back into complete program summaries.
+
+    Includes all generated sections: overview, flowchart, I/O, structure,
+    core logic, and dependencies.
     """
     logging.info("Aggregating chunked results...")
 
     ti = context['ti']
-    df_json = ti.xcom_pull(task_ids='generate_io_parallel')
+    df_json = ti.xcom_pull(task_ids='generate_dependencies_parallel')
     df = pd.read_json(df_json, orient='records')
 
     # Group by original file
@@ -1343,18 +2153,36 @@ def task_aggregate_chunks(**context) -> str:
 
         # Combine overviews
         overviews = [r['program_overview'] for _, r in file_chunks.iterrows()
-                    if not r['program_overview'].startswith('Error')]
+                    if not str(r['program_overview']).startswith('Error')]
         combined_overview = '\n\n---\n\n'.join(overviews) if overviews else "Generation failed"
 
         # Take best flowchart (usually from PROCEDURE division)
         flowcharts = [r['flowchart'] for _, r in file_chunks.iterrows()
-                     if not r['flowchart'].startswith('N/A') and not r['flowchart'].startswith('Error')]
+                     if not str(r['flowchart']).startswith('N/A') and not str(r['flowchart']).startswith('Error')]
         combined_flowchart = flowcharts[0] if flowcharts else "No flowchart generated"
 
         # Combine I/O
         ios = [r['input_output'] for _, r in file_chunks.iterrows()
-              if not r['input_output'].startswith('Error')]
+              if not str(r['input_output']).startswith('Error')]
         combined_io = '\n\n'.join(ios) if ios else "Generation failed"
+
+        # Combine Program Structure
+        structures = [r['program_structure'] for _, r in file_chunks.iterrows()
+                     if 'program_structure' in r and not str(r['program_structure']).startswith('Error')
+                     and not str(r['program_structure']).startswith('N/A')]
+        combined_structure = '\n\n'.join(structures) if structures else "Structure analysis not generated"
+
+        # Take best core logic (usually from PROCEDURE division)
+        core_logics = [r['core_logic'] for _, r in file_chunks.iterrows()
+                      if 'core_logic' in r and not str(r['core_logic']).startswith('N/A')
+                      and not str(r['core_logic']).startswith('Error')]
+        combined_core_logic = core_logics[0] if core_logics else "Core logic not generated"
+
+        # Combine dependencies
+        deps = [r['dependencies'] for _, r in file_chunks.iterrows()
+               if 'dependencies' in r and not str(r['dependencies']).startswith('Error')
+               and not str(r['dependencies']).startswith('N/A')]
+        combined_dependencies = '\n\n'.join(deps) if deps else "Dependencies analysis not generated"
 
         first_row = file_chunks.iloc[0]
 
@@ -1367,6 +2195,9 @@ def task_aggregate_chunks(**context) -> str:
             'program_overview': combined_overview,
             'flowchart': combined_flowchart,
             'input_output': combined_io,
+            'program_structure': combined_structure,
+            'core_logic': combined_core_logic,
+            'dependencies': combined_dependencies,
             'chunk_count': len(file_chunks)
         })
 
@@ -1414,6 +2245,12 @@ def task_validate_summaries(**context) -> str:
 {row['flowchart']}
 
 {row['input_output']}
+
+{row.get('program_structure', '')}
+
+{row.get('core_logic', '')}
+
+{row.get('dependencies', '')}
 """
 
         result = validator.validate_summary(combined_summary)
@@ -1489,12 +2326,39 @@ def task_combine_and_save(**context) -> dict:
 {chr(10).join(f'- {log}' for log in logs[:20])}
 """
 
+        # Build structure section if available
+        structure_section = ""
+        if row.get('program_structure') and row['program_structure'] != "Structure analysis not generated":
+            structure_section = f"""
+---
+
+{row['program_structure']}
+"""
+
+        # Build core logic section if available
+        core_logic_section = ""
+        if row.get('core_logic') and row['core_logic'] != "Core logic not generated":
+            core_logic_section = f"""
+---
+
+{row['core_logic']}
+"""
+
+        # Build dependencies section if available
+        dependencies_section = ""
+        if row.get('dependencies') and row['dependencies'] != "Dependencies analysis not generated":
+            dependencies_section = f"""
+---
+
+{row['dependencies']}
+"""
+
         # Combine into final document
         combined = f"""# COBOL Program Analysis: {row['file_name']}
 
 **Program ID**: {row['program_name']}
 **Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-**Analysis Version**: 2.0 (Enhanced with Copybook Resolution & Validation)
+**Analysis Version**: 2.0 (Enhanced with Copybook Resolution, RAGFlow Integration & Validation)
 
 ---
 
@@ -1507,7 +2371,9 @@ def task_combine_and_save(**context) -> dict:
 ---
 
 {row['input_output']}
-
+{structure_section}
+{core_logic_section}
+{dependencies_section}
 {validation_section}
 
 {copybook_section}
@@ -1559,10 +2425,10 @@ default_args = {
 with DAG(
     dag_id='cobol_business_summary_v2',
     default_args=default_args,
-    description='COBOL Business Summary Generator - Enhanced with Copybook Resolution & Validation',
+    description='COBOL Business Summary Generator - Enhanced with Copybook Resolution, RAGFlow Integration & Validation',
     schedule_interval=None,
     catchup=False,
-    tags=['cobol', 'mainframe', 'modernization', 'documentation', 'v2'],
+    tags=['cobol', 'mainframe', 'modernization', 'documentation', 'v2', 'ragflow'],
     doc_md=__doc__,
 ) as dag:
 
@@ -1580,24 +2446,45 @@ with DAG(
         provide_context=True,
     )
 
-    # Task 3: Generate overviews (parallel)
+    # Task 3: Generate overviews (parallel/RAGFlow)
     gen_overview = PythonOperator(
         task_id='generate_overview_parallel',
         python_callable=task_generate_overview_parallel,
         provide_context=True,
     )
 
-    # Task 4: Generate flowcharts (parallel)
+    # Task 4: Generate flowcharts (parallel/RAGFlow)
     gen_flowchart = PythonOperator(
         task_id='generate_flowchart_parallel',
         python_callable=task_generate_flowchart_parallel,
         provide_context=True,
     )
 
-    # Task 5: Generate I/O documentation (parallel)
+    # Task 5: Generate I/O documentation (parallel/RAGFlow)
     gen_io = PythonOperator(
         task_id='generate_io_parallel',
         python_callable=task_generate_io_parallel,
+        provide_context=True,
+    )
+
+    # Task 5b: Generate Program Structure Analysis (parallel/RAGFlow)
+    gen_structure = PythonOperator(
+        task_id='generate_structure_parallel',
+        python_callable=task_generate_structure_parallel,
+        provide_context=True,
+    )
+
+    # Task 5c: Generate Detailed Core Logic (parallel/RAGFlow)
+    gen_core_logic = PythonOperator(
+        task_id='generate_core_logic_parallel',
+        python_callable=task_generate_core_logic_parallel,
+        provide_context=True,
+    )
+
+    # Task 5d: Generate Dependencies documentation (parallel/RAGFlow)
+    gen_dependencies = PythonOperator(
+        task_id='generate_dependencies_parallel',
+        python_callable=task_generate_dependencies_parallel,
         provide_context=True,
     )
 
@@ -1622,5 +2509,6 @@ with DAG(
         provide_context=True,
     )
 
-    # Task dependencies
-    load_enrich >> chunk_programs >> gen_overview >> gen_flowchart >> gen_io >> aggregate >> validate >> save_results
+    # Task dependencies - complete pipeline with all documentation sections
+    # Load -> Chunk -> Overview -> Flowchart -> I/O -> Structure -> Core Logic -> Dependencies -> Aggregate -> Validate -> Save
+    load_enrich >> chunk_programs >> gen_overview >> gen_flowchart >> gen_io >> gen_structure >> gen_core_logic >> gen_dependencies >> aggregate >> validate >> save_results
