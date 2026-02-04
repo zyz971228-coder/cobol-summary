@@ -102,7 +102,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.models import Variable
 
 import pandas as pd
 import threading
@@ -1116,7 +1115,7 @@ def create_ragflow_client(config: dict) -> RAGFlowClient:
     if not config.get("ragflow_api_key"):
         raise ValueError(
             "RAGFlow requires RAGFLOW_API_KEY to be set. "
-            "Please configure this in Airflow Variables or environment variables."
+            "Please configure this in environment variables."
         )
 
     chat_id = config.get("ragflow_chat_id")
@@ -1382,60 +1381,43 @@ User may ask you specific question regarding the cobol file, answer the question
 # ============================================================================
 
 def get_config() -> dict:
-    """Get configuration from Airflow Variables or environment."""
+    """Get configuration from environment variables."""
     config = DEFAULT_CONFIG.copy()
 
-    try:
-        # LLM Configuration
-        config["llm_base_url"] = Variable.get("LLM_BASE_URL", default_var=config["llm_base_url"])
-        config["llm_api_key"] = Variable.get("LLM_API_KEY", default_var="")
-        config["llm_model_name"] = Variable.get("LLM_MODEL_NAME", default_var=config["llm_model_name"])
+    # LLM Configuration
+    config["llm_base_url"] = os.getenv("LLM_BASE_URL", config["llm_base_url"])
+    config["llm_api_key"] = os.getenv("LLM_API_KEY", "")
+    config["llm_model_name"] = os.getenv("LLM_MODEL_NAME", config["llm_model_name"])
 
-        # RAGFlow Configuration
-        config["ragflow_api_base"] = Variable.get("RAGFLOW_HOST", default_var=config["ragflow_api_base"])
-        config["ragflow_api_key"] = Variable.get("RAGFLOW_API_KEY", default_var="")
-        config["ragflow_chat_id"] = Variable.get("RAGFLOW_CHAT_ID", default_var="")
-        config["ragflow_chat_name"] = Variable.get("RAGFLOW_CHAT_NAME", default_var="")
+    # RAGFlow Configuration
+    config["ragflow_api_base"] = os.getenv("RAGFLOW_HOST", config["ragflow_api_base"])
+    config["ragflow_api_key"] = os.getenv("RAGFLOW_API_KEY", "")
+    config["ragflow_chat_id"] = os.getenv("RAGFLOW_CHAT_ID", "")
+    config["ragflow_chat_name"] = os.getenv("RAGFLOW_CHAT_NAME", "")
+    config["use_ragflow"] = os.getenv("USE_RAGFLOW", "false").lower() == "true"
 
-        # Directories
-        config["cobol_input_dir"] = Variable.get("COBOL_INPUT_DIR", default_var=config["cobol_input_dir"])
-        config["cobol_output_dir"] = Variable.get("COBOL_OUTPUT_DIR", default_var=config["cobol_output_dir"])
-        config["copybook_dirs"] = Variable.get(
-            "COPYBOOK_DIRS",
-            default_var=",".join(config["copybook_dirs"])
-        ).split(",")
+    # Directories
+    config["cobol_input_dir"] = os.getenv("COBOL_INPUT_DIR", config["cobol_input_dir"])
+    config["cobol_output_dir"] = os.getenv("COBOL_OUTPUT_DIR", config["cobol_output_dir"])
+    copybook_dirs_env = os.getenv("COPYBOOK_DIRS", "")
+    if copybook_dirs_env:
+        config["copybook_dirs"] = copybook_dirs_env.split(",")
 
-        # Feature flags
-        config["enable_copybook_resolution"] = Variable.get(
-            "ENABLE_COPYBOOK_RESOLUTION", default_var="true"
-        ).lower() == "true"
-        config["enable_validation"] = Variable.get(
-            "ENABLE_VALIDATION", default_var="true"
-        ).lower() == "true"
-        config["use_ragflow"] = Variable.get("USE_RAGFLOW", default_var="false").lower() == "true"
+    # Feature flags
+    config["enable_copybook_resolution"] = os.getenv(
+        "ENABLE_COPYBOOK_RESOLUTION", "true"
+    ).lower() == "true"
+    config["enable_validation"] = os.getenv(
+        "ENABLE_VALIDATION", "true"
+    ).lower() == "true"
 
-        # Generation flags
-        config["generate_overview"] = Variable.get("GENERATE_OVERVIEW", default_var="true").lower() == "true"
-        config["generate_flowchart"] = Variable.get("GENERATE_FLOWCHART", default_var="true").lower() == "true"
-        config["generate_io"] = Variable.get("GENERATE_IO", default_var="true").lower() == "true"
-        config["generate_structure"] = Variable.get("GENERATE_STRUCTURE", default_var="true").lower() == "true"
-        config["generate_core_logic"] = Variable.get("GENERATE_CORE_LOGIC", default_var="true").lower() == "true"
-        config["generate_dependencies"] = Variable.get("GENERATE_DEPENDENCIES", default_var="true").lower() == "true"
-
-    except Exception:
-        # Fallback to environment variables
-        config["llm_base_url"] = os.getenv("LLM_BASE_URL", config["llm_base_url"])
-        config["llm_api_key"] = os.getenv("LLM_API_KEY", "")
-        config["llm_model_name"] = os.getenv("LLM_MODEL_NAME", config["llm_model_name"])
-        config["cobol_input_dir"] = os.getenv("COBOL_INPUT_DIR", config["cobol_input_dir"])
-        config["cobol_output_dir"] = os.getenv("COBOL_OUTPUT_DIR", config["cobol_output_dir"])
-
-        # RAGFlow from environment
-        config["ragflow_api_base"] = os.getenv("RAGFLOW_HOST", config["ragflow_api_base"])
-        config["ragflow_api_key"] = os.getenv("RAGFLOW_API_KEY", "")
-        config["ragflow_chat_id"] = os.getenv("RAGFLOW_CHAT_ID", "")
-        config["ragflow_chat_name"] = os.getenv("RAGFLOW_CHAT_NAME", "")
-        config["use_ragflow"] = os.getenv("USE_RAGFLOW", "false").lower() == "true"
+    # Generation flags
+    config["generate_overview"] = os.getenv("GENERATE_OVERVIEW", "true").lower() == "true"
+    config["generate_flowchart"] = os.getenv("GENERATE_FLOWCHART", "true").lower() == "true"
+    config["generate_io"] = os.getenv("GENERATE_IO", "true").lower() == "true"
+    config["generate_structure"] = os.getenv("GENERATE_STRUCTURE", "true").lower() == "true"
+    config["generate_core_logic"] = os.getenv("GENERATE_CORE_LOGIC", "true").lower() == "true"
+    config["generate_dependencies"] = os.getenv("GENERATE_DEPENDENCIES", "true").lower() == "true"
 
     return config
 
