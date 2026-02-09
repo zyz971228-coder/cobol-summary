@@ -286,21 +286,34 @@ RAGFLOW_SYSTEM_PROMPT = """You are an intelligent assistant. Please summarize th
       The above is the knowledge base."""
 
 # Standard System Prompt for non-RAGFlow usage
-SYSTEM_PROMPT = """You are an expert COBOL programmer and technical documentation specialist.
-Analyze the provided COBOL source code and generate clear, accurate documentation."""
+SYSTEM_PROMPT = """# Role
+You are a professional business analyst with more than 20-year experience in a world class software development company. Having technical user from the bank as the audience of your documentation. The bank is now requesting you to write a technical specification document on the cobol code they provide. Please provide information in a business formal, technical and professional style. Please write in a concise and informative tone. By referring to the knowledge base in the manual dataset, it gives you a better understanding of the cobol structure and definition.
 
-PROGRAM_OVERVIEW_PROMPT = """By analyzing above cobol source code, provide the Program Overview, write no less than 300 words in this session. Generate the Program Overview one time only, do not repeat.
+# Task
+Your primary task is to analyze the COBOL code file running on HP non-stop tandem provided by the user and generate a comprehensive, structured Markdown technical document. User may ask you specific question regarding the cobol file, answer the question base on the understanding of the file.
+
+# Constraints and Limitations
+* **Adhere to Original Text**: All explanations and analyses must strictly be based on the provided COBOL code; do not guess or add functionalities do not present in the code.
+* **Professional Terminology**: Use professional and accurate terminology while ensuring clarity.
+* **Language**: Conduct analysis and documentation writing in English.
+* **Format**: Strictly follow the defined Markdown output format below, without omitting any part.
+* **Line References**: When describing code content, always indicate the source line range (e.g., "From Line X to Line Y") so readers can trace back to the original code."""
+
+PROGRAM_OVERVIEW_PROMPT = """By analyzing above cobol source code, provide the Program Overview, write no less than 300 words in this session. Generate the Program Overview one time only, do not repeat. Strictly follow the defined Markdown output format below, without omitting any part. Do not need to show the word count.
+For each part of the overview, indicate the source line range in the original code (e.g., "Based on Line X to Line Y").
 
 ## 1. Program Overview
 
-* **Program ID**: `[Extracted from IDENTIFICATION DIVISION]`
+* **Program ID**: `[Extracted from IDENTIFICATION DIVISION]` (From Line [X] to Line [Y])
 * **Function Description**: A concise summary of the program's main business purpose.
-* **Main Processes **: List out all the processes in the cobol program, by looking into the PROCEDURE DIVISION."""
+* **Main Processes **: List out all the processes in the cobol program, by looking into the PROCEDURE DIVISION. For each process, indicate its line range (e.g., From Line [X] to Line [Y])."""
 
 FLOWCHART_PROMPT = """By analyzing the cobol source code above, provide the Flowchart. Use Mermaid syntax to visualize the main execution flow of `PROCEDURE DIVISION`.
 Please strictly generate the document in the following Markdown structure:
 
 ## 2. Flowchart
+(Based on PROCEDURE DIVISION, From Line [X] to Line [Y])
+
 ```mermaid
 graph TD
     A[Start] --> B[Read Input File];
@@ -313,15 +326,16 @@ graph TD
 ```
 """
 
-INPUT_OUTPUT_PROMPT = """By analyzing the cobol source code above, provide the Input/Output of the code in below md format
+INPUT_OUTPUT_PROMPT = """By analyzing the cobol source code above, provide the Input/Output of the code in below md format.
+For each input/output file, indicate the line range where it is defined or referenced in the original code.
 
 ## 3. Input/Output
 * **Input**:
-    * `[Input File Name 1]`: [Briefly describe the purpose and key fields of this file].
+    * `[Input File Name 1]`: [Briefly describe the purpose and key fields of this file]. (Defined at Line [X] to Line [Y])
     * `[Input File Name 2]`: ...
 	...
 * **Output**:
-    * `[Output File Name 1]`: [Briefly describe the purpose and generation method of this file].
+    * `[Output File Name 1]`: [Briefly describe the purpose and generation method of this file]. (Defined at Line [X] to Line [Y])
     * `[Output File Name 2]`: ...
 	...
 """
@@ -598,10 +612,7 @@ def combine_analysis_results(
     """
     delimiter = "\n\n"
 
-    header = f"""# COBOL Program Analysis: {file_name}
-Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
----
+    header = f"""# {file_name}
 """
 
     combined = delimiter.join([

@@ -69,16 +69,19 @@ class ThreadSafeLLMClient:
 # Enhanced Prompt Templates
 # ============================================================================
 
-ENHANCED_SYSTEM_PROMPT = """You are an expert COBOL programmer with 30 years of mainframe experience and a
-business analyst specializing in legacy system documentation.
+ENHANCED_SYSTEM_PROMPT = """# Role
+You are a professional business analyst with more than 20-year experience in a world class software development company. Having technical user from the bank as the audience of your documentation. The bank is now requesting you to write a technical specification document on the cobol code they provide. Please provide information in a business formal, technical and professional style. Please write in a concise and informative tone. By referring to the knowledge base in the manual dataset, it gives you a better understanding of the cobol structure and definition.
 
-IMPORTANT RULES:
-1. Focus on WHAT the code accomplishes for the business, not HOW it's implemented
-2. Translate technical operations into business terminology
-3. Identify business rules hidden in conditional logic
-4. Only mention code elements (paragraph names, file names) that actually exist in the source
-5. If you're uncertain about something, say so rather than guessing
-6. Use the pre-analyzed structure provided to guide your analysis"""
+# Task
+Your primary task is to analyze the COBOL code file running on HP non-stop tandem provided by the user and generate a comprehensive, structured Markdown technical document. User may ask you specific question regarding the cobol file, answer the question base on the understanding of the file.
+
+# Constraints and Limitations
+* **Adhere to Original Text**: All explanations and analyses must strictly be based on the provided COBOL code; do not guess or add functionalities do not present in the code.
+* **Professional Terminology**: Use professional and accurate terminology while ensuring clarity.
+* **Language**: Conduct analysis and documentation writing in English.
+* **Format**: Strictly follow the defined Markdown output format below, without omitting any part.
+* **Line References**: When describing code content, always indicate the source line range (e.g., "From Line X to Line Y") so readers can trace back to the original code.
+* **Pre-Analyzed Context**: Use the pre-analyzed structure provided to guide your analysis for accuracy."""
 
 
 def create_enhanced_overview_prompt(
@@ -104,32 +107,14 @@ def create_enhanced_overview_prompt(
 """
 
     return f"""{context_section}{data_section}## Your Task:
-Analyze this COBOL program and provide a comprehensive business overview.
+By analyzing the cobol source code below, provide the Program Overview, write no less than 300 words in this session. Generate the Program Overview one time only, do not repeat. Strictly follow the defined Markdown output format below, without omitting any part. Do not need to show the word count.
+For each part of the overview, indicate the source line range in the original code (e.g., "Based on Line X to Line Y").
 
-### Required Output Format:
+## 1. Program Overview
 
-#### 1. Program Identification
-- **Program ID**: [Extract from IDENTIFICATION DIVISION]
-- **Business Domain**: [e.g., Customer Management, Order Processing, Financial Reporting]
-- **Primary Business Function**: [One sentence describing the business purpose]
-
-#### 2. Business Process Summary
-Describe what this program accomplishes from a BUSINESS perspective (not technical).
-Focus on the business outcomes and transformations, not the code mechanics.
-
-#### 3. Key Business Rules
-List the main business rules implemented (extract from IF/EVALUATE):
-- Rule 1: [Business condition] -> [Business outcome]
-- Rule 2: [Business condition] -> [Business outcome]
-
-#### 4. Main Processing Steps (Business-Level)
-1. [Step in business terms, not code terms]
-2. [Step in business terms]
-
-#### 5. Dependencies & Integration Points
-- **Input Sources**: [What business data comes in?]
-- **Output Destinations**: [What business data goes out?]
-- **External Systems**: [What systems does this interact with?]
+* **Program ID**: `[Extracted from IDENTIFICATION DIVISION]` (From Line [X] to Line [Y])
+* **Function Description**: A concise summary of the program's main business purpose.
+* **Main Processes **: List out all the processes in the cobol program, by looking into the PROCEDURE DIVISION. For each process, indicate its line range (e.g., From Line [X] to Line [Y]).
 
 ### COBOL Source Code:
 ```cobol
@@ -164,34 +149,22 @@ def create_enhanced_flowchart_prompt(
 """
 
     return f"""{flow_section}## Your Task:
-Create a business-level flowchart for this COBOL program's main processing flow.
+By analyzing the cobol source code below, provide the Flowchart. Use Mermaid syntax to visualize the main execution flow of `PROCEDURE DIVISION`.
+Please strictly generate the document in the following Markdown structure:
 
-### Requirements:
-- Show BUSINESS DECISIONS, not just PERFORM statements
-- Use business terminology in node labels
-- Only include elements that exist in the code
-- Focus on the main happy path with key decision points
+## 2. Flowchart
+(Based on PROCEDURE DIVISION, From Line [X] to Line [Y])
 
-### Output Format (Mermaid):
 ```mermaid
 graph TD
-    subgraph "Business Process: [Name]"
-    A[Start] --> B[Initialize Processing]
-    B --> C{{Business Decision}}
-    C -->|"Condition: [business term]"| D[Process A]
-    C -->|"Condition: [business term]"| E[Process B]
-    D --> F[Finalize]
-    E --> F
-    F --> G[End]
-    end
+    A[Start] --> B[Read Input File];
+    B --> C[End of File?];
+    C -- Yes --> D[Close Files];
+    C -- No --> E[Process Record];
+    E --> F[Write to Output File];
+    F --> B;
+    D --> G[End];
 ```
-
-### Guidelines:
-- Use diamond shapes {{{{}}}} for business decisions
-- Use rectangles [] for processing steps
-- Label edges with business conditions
-- Group related steps in subgraphs
-- Maximum 15-20 nodes for readability
 
 ### COBOL Source Code:
 ```cobol
@@ -237,38 +210,47 @@ def create_enhanced_core_logic_prompt(
 """
 
     return f"""{para_section}{hierarchy_section}## Your Task:
-Document the detailed core logic for each major function/paragraph.
+By analyzing the cobol source code below,
+First, list out all the functions by looking for the PERFORM (`perform`) in `PROCEDURE DIVISION` in logical order and provide the line no for that function.
+Do not miss out any `perform` in the `PROCEDURE DIVISION`.
+If the function is calling another sub-function, please list out all the sub-function being called in the main function.
+List all the sub-functions being called as a normal function after all the main function.
+Second, provide the mermaid flowchart and detailed steps for each function.
+For both flowcharts and steps, it has to be as detailed as possible to capture all detailed logic of the function.
+Detailed validation rules, default values, error handling must be clearly stated in the steps.
+The steps have to be in sync with the flowchart.
+Write no less than 150 words for each function.
+Do not need to generate other section such as overview, flowchart, input/output, Program Structure Analysis. Only need to generate the Detailed Core Logic part.
+For each function, clearly indicate the source line range (From Line X to Line Y) so readers can trace back to the original code.
+provide the Detailed Core Logic of the code in below md format.
 
-### Required Output Format:
+## 5. Detailed Core Logic
 
-#### Function List Summary:
-| Function Name | Lines | Calls | Description |
-|---------------|-------|-------|-------------|
-| [Name] | [X-Y] | [Sub1, Sub2] | [Brief purpose] |
+* **Function List**:
+    * `[Function 1]`: From Line [150] to line [200]. [Function 1] is calling [Sub-function 1]
+    * `[Function 2]`: From Line [205] to line [249].
+	* `[Sub-function 1]`: From Line [833] to line [892]. [Sub-function 1] is calling [Sub-function 2]
+	* `[Sub-function 2]`: From Line [916] to line [990].
+	...
 
-#### Detailed Function Documentation:
+* **`[Function 1]`** (From Line [150] to Line [200]):
+	```mermaid
+	graph TD
+		flowchart for Function 1
+	```
+    * [Step 1, describe the first step of Function 1 in detail]
+	* [Step 2, describe the second step of Function 1 in detail]
+	...
 
-For each major function (top 10 by importance):
-
-**`[FUNCTION-NAME]`** (Lines X-Y)
-
-*Purpose*: [What business function does this perform?]
-
-*Flow*:
-```mermaid
-graph TD
-    A[Entry] --> B[Step 1]
-    B --> C{{Decision}}
-    C --> D[Step 2]
-```
-
-*Detailed Steps*:
-1. **[Step Name]**: [150+ word description explaining the business logic,
-   validation rules, default values, and error handling]
-2. **[Step Name]**: [Detailed description]
-
-*Data Accessed*: [List key data structures used]
-*Error Handling*: [Describe error scenarios and handling]
+* **`[Function 2]`** (From Line [205] to Line [249]):
+	```mermaid
+	graph TD
+		flowchart for Function 2
+	```
+    * [Step 1, describe the first step of Function 2 in detail]
+	* [Step 2, describe the second step of Function 2 in detail]
+	...
+...
 
 ### COBOL Source Code:
 ```cobol
