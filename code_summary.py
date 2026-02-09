@@ -1157,100 +1157,67 @@ def create_ragflow_client(config: dict) -> RAGFlowClient:
 # Prompt Templates (Enhanced)
 # ============================================================================
 
-SYSTEM_PROMPT_EXPERT = """You are an expert COBOL programmer with 30 years of mainframe experience and a
-business analyst specializing in legacy system documentation. Your task is to analyze COBOL source code
-and extract BUSINESS MEANING, not just code syntax.
+SYSTEM_PROMPT_EXPERT = """# Role
+You are a professional business analyst with more than 20-year experience in a world class software development company. Having technical user from the bank as the audience of your documentation. The bank is now requesting you to write a technical specification document on the cobol code they provide. Please provide information in a business formal, technical and professional style. Please write in a concise and informative tone. By referring to the knowledge base in the manual dataset, it gives you a better understanding of the cobol structure and definition.
 
-IMPORTANT RULES:
-1. Focus on WHAT the code accomplishes for the business, not HOW it's implemented
-2. Translate technical operations into business terminology
-3. Identify business rules hidden in conditional logic
-4. Only mention code elements (paragraph names, file names) that actually exist in the source
-5. If you're uncertain about something, say so rather than guessing"""
+# Task
+Your primary task is to analyze the COBOL code file running on HP non-stop tandem provided by the user and generate a comprehensive, structured Markdown technical document. User may ask you specific question regarding the cobol file, answer the question base on the understanding of the file.
 
-PROGRAM_OVERVIEW_PROMPT_V2 = """Analyze this COBOL program and provide a comprehensive business overview.
+# Constraints and Limitations
+* **Adhere to Original Text**: All explanations and analyses must strictly be based on the provided COBOL code; do not guess or add functionalities do not present in the code.
+* **Professional Terminology**: Use professional and accurate terminology while ensuring clarity.
+* **Language**: Conduct analysis and documentation writing in English.
+* **Format**: Strictly follow the defined Markdown output format below, without omitting any part.
+* **Line References**: When describing code content, always indicate the source line range (e.g., "From Line X to Line Y") so readers can trace back to the original code."""
 
-## Required Output Format:
+PROGRAM_OVERVIEW_PROMPT_V2 = """By analyzing the cobol source code below, provide the Program Overview, write no less than 300 words in this session. Generate the Program Overview one time only, do not repeat. Strictly follow the defined Markdown output format below, without omitting any part. Do not need to show the word count.
+For each part of the overview, indicate the source line range in the original code (e.g., "Based on Line X to Line Y").
 
-### 1. Program Identification
-- **Program ID**: [Extract from IDENTIFICATION DIVISION]
-- **Business Domain**: [e.g., Customer Management, Order Processing, Financial Reporting]
-- **Primary Business Function**: [One sentence describing the business purpose]
+## 1. Program Overview
 
-### 2. Business Process Summary
-Describe what this program accomplishes from a BUSINESS perspective (not technical).
-For example: "This program validates customer orders against inventory levels and calculates applicable discounts based on customer tier and order volume."
-
-### 3. Key Business Rules
-List the main business rules implemented in this program:
-- Rule 1: [Description]
-- Rule 2: [Description]
-(Extract from IF/EVALUATE statements, focusing on business meaning)
-
-### 4. Main Processing Steps
-List the high-level business steps in order:
-1. [Step description in business terms]
-2. [Step description in business terms]
-
-### 5. Dependencies & Integration Points
-- **Upstream Systems**: [What feeds data to this program?]
-- **Downstream Systems**: [What consumes this program's output?]
+* **Program ID**: `[Extracted from IDENTIFICATION DIVISION]` (From Line [X] to Line [Y])
+* **Function Description**: A concise summary of the program's main business purpose.
+* **Main Processes **: List out all the processes in the cobol program, by looking into the PROCEDURE DIVISION. For each process, indicate its line range (e.g., From Line [X] to Line [Y]).
 
 COBOL Source Code:
 ```cobol
 {cobol_code}
 ```"""
 
-FLOWCHART_PROMPT_V2 = """Analyze this COBOL program's PROCEDURE DIVISION and create a business-level flowchart.
+FLOWCHART_PROMPT_V2 = """By analyzing the cobol source code below, provide the Flowchart. Use Mermaid syntax to visualize the main execution flow of `PROCEDURE DIVISION`.
+Please strictly generate the document in the following Markdown structure:
 
-IMPORTANT:
-- Create a flowchart that shows BUSINESS DECISIONS, not just PERFORM statements
-- Use business terminology in node labels
-- Only include paragraphs/sections that actually exist in the code
-
-## Required Output:
+## 2. Flowchart
+(Based on PROCEDURE DIVISION, From Line [X] to Line [Y])
 
 ```mermaid
 graph TD
-    subgraph "Business Process Flow"
-    A[Start] --> B[Initialize]
-    B --> C{{First Business Decision}}
-    C -->|Condition 1| D[Action 1]
-    C -->|Condition 2| E[Action 2]
-    end
+    A[Start] --> B[Read Input File];
+    B --> C[End of File?];
+    C -- Yes --> D[Close Files];
+    C -- No --> E[Process Record];
+    E --> F[Write to Output File];
+    F --> B;
+    D --> G[End];
 ```
-
-Guidelines:
-- Use diamond shapes {{}} for business decisions
-- Use rectangles [] for processing steps
-- Group related steps in subgraphs
-- Label edges with business conditions, not just "YES/NO"
 
 COBOL Source Code:
 ```cobol
 {cobol_code}
 ```"""
 
-INPUT_OUTPUT_PROMPT_V2 = """Analyze this COBOL program and document all inputs and outputs with BUSINESS context.
+INPUT_OUTPUT_PROMPT_V2 = """By analyzing the cobol source code below, provide the Input/Output of the code in below md format.
+For each input/output file, indicate the line range where it is defined or referenced in the original code.
 
-## Required Output Format:
-
-### Input Sources
-| Logical Name | Physical Name | Business Description | Key Fields |
-|--------------|---------------|---------------------|------------|
-| [FD name] | [From ASSIGN] | [What business data?] | [Important fields] |
-
-### Output Destinations
-| Logical Name | Physical Name | Business Description | Content |
-|--------------|---------------|---------------------|---------|
-| [FD name] | [From ASSIGN] | [What business data?] | [What's written] |
-
-### Working Storage Key Structures
-List important data structures that represent business entities:
-- [01-level name]: [Business entity description]
-
-### External Calls/APIs
-- [CALL statement targets and their purpose]
+## 3. Input/Output
+* **Input**:
+    * `[Input File Name 1]`: [Briefly describe the purpose and key fields of this file]. (Defined at Line [X] to Line [Y])
+    * `[Input File Name 2]`: ...
+	...
+* **Output**:
+    * `[Output File Name 1]`: [Briefly describe the purpose and generation method of this file]. (Defined at Line [X] to Line [Y])
+    * `[Output File Name 2]`: ...
+	...
 
 COBOL Source Code:
 ```cobol
@@ -1280,91 +1247,83 @@ Provide a brief validation report with:
 
 # Additional prompts from Cobol_Summary_11Nov.json (config.json Prompt_4, 5, 6)
 
-PROGRAM_STRUCTURE_PROMPT = """Analyze this COBOL program and provide a detailed Program Structure Analysis.
-
-## Required Output Format:
+PROGRAM_STRUCTURE_PROMPT = """By analyzing the cobol source code below, provide the Program Structure Analysis of the code in below md format.
+For each division/section, indicate the source line range in the original code (e.g., "From Line X to Line Y").
 
 ## 4. Program Structure Analysis
-
-* **IDENTIFICATION DIVISION**: Metadata information of the program, such as author, date, program name, etc.
-* **ENVIRONMENT DIVISION**: Describes the program's runtime environment, especially FILE-CONTROL related to files.
-* **DATA DIVISION**:
-    * **FILE SECTION**: Defines input/output files (FD) used by the program and their record layouts.
-    * **WORKING-STORAGE SECTION**: Describes key variables, flags, counters, and data structures used internally in the program.
-    * **LINKAGE SECTION**: (if present) Describes parameters passed to/from this program.
-* **PROCEDURE DIVISION**: The core logic of the program, describing major paragraphs/sections and their functions.
+* **`IDENTIFICATION DIVISION`**: Metadata information of the program, such as author, date, etc. (From Line [X] to Line [Y])
+* **`ENVIRONMENT DIVISION`**: Describes the program's runtime environment, especially `FILE-CONTROL` related to files. (From Line [X] to Line [Y])
+* **`DATA DIVISION`**:
+    * **`FILE SECTION`**: Defines input/output files (FD) used by the program and their record layouts. (From Line [X] to Line [Y])
+    * **`WORKING-STORAGE SECTION`**: Describes key variables, flags, counters, and data structures used internally in the program. (From Line [X] to Line [Y])
+* **`PROCEDURE DIVISION`**: The core logic of the program, describing major paragraphs and their functions. (From Line [X] to Line [Y])
 
 COBOL Source Code:
 ```cobol
 {cobol_code}
 ```"""
 
-CORE_LOGIC_PROMPT = """Analyze this COBOL program's PROCEDURE DIVISION and provide detailed core logic documentation.
-
-## Instructions:
-1. First, list out ALL functions by looking for PERFORM statements in PROCEDURE DIVISION in logical order.
-   Provide the line number for each function. Do not miss any PERFORM in the PROCEDURE DIVISION.
-2. If a function calls another sub-function, list all sub-functions being called.
-3. For each function, provide:
-   - A Mermaid flowchart showing the logic flow
-   - Detailed steps (minimum 150 words per function)
-   - Validation rules, default values, and error handling must be clearly stated
-
-## Required Output Format:
+CORE_LOGIC_PROMPT = """By analyzing the cobol source code below,
+First, list out all the functions by looking for the PERFORM (`perform`) in `PROCEDURE DIVISION` in logical order and provide the line no for that function.
+Do not miss out any `perform` in the `PROCEDURE DIVISION`.
+If the function is calling another sub-function, please list out all the sub-function being called in the main function.
+List all the sub-functions being called as a normal function after all the main function.
+Second, provide the mermaid flowchart and detailed steps for each function.
+For both flowcharts and steps, it has to be as detailed as possible to capture all detailed logic of the function.
+Detailed validation rules, default values, error handling must be clearly stated in the steps.
+The steps have to be in sync with the flowchart.
+Write no less than 150 words for each function.
+Do not need to generate other section such as overview, flowchart, input/output, Program Structure Analysis. Only need to generate the Detailed Core Logic part.
+For each function, clearly indicate the source line range (From Line X to Line Y) so readers can trace back to the original code.
+provide the Detailed Core Logic of the code in below md format.
 
 ## 5. Detailed Core Logic
 
 * **Function List**:
-    * `[Function 1]`: From Line [XXX] to line [XXX]. [Function 1] is calling [Sub-function 1]
-    * `[Function 2]`: From Line [XXX] to line [XXX].
-    * `[Sub-function 1]`: From Line [XXX] to line [XXX]. [Sub-function 1] is calling [Sub-function 2]
-    * `[Sub-function 2]`: From Line [XXX] to line [XXX].
+    * `[Function 1]`: From Line [150] to line [200]. [Function 1] is calling [Sub-function 1]
+    * `[Function 2]`: From Line [205] to line [249].
+	* `[Sub-function 1]`: From Line [833] to line [892]. [Sub-function 1] is calling [Sub-function 2]
+	* `[Sub-function 2]`: From Line [916] to line [990].
+	...
 
-* **`[Function 1]`**:
-```mermaid
-graph TD
-    [flowchart for Function 1]
-```
-    * Step 1: [Detailed description of step 1]
-    * Step 2: [Detailed description of step 2]
-    * ...
+* **`[Function 1]`** (From Line [150] to Line [200]):
+	```mermaid
+	graph TD
+		flowchart for Function 1
+	```
+    * [Step 1, describe the first step of Function 1 in detail]
+	* [Step 2, describe the second step of Function 1 in detail]
+	...
 
-* **`[Function 2]`**:
-```mermaid
-graph TD
-    [flowchart for Function 2]
-```
-    * Step 1: [Detailed description of step 1]
-    * Step 2: [Detailed description of step 2]
-    * ...
+* **`[Function 2]`** (From Line [205] to Line [249]):
+	```mermaid
+	graph TD
+		flowchart for Function 2
+	```
+    * [Step 1, describe the first step of Function 2 in detail]
+	* [Step 2, describe the second step of Function 2 in detail]
+	...
+...
 
 COBOL Source Code:
 ```cobol
 {cobol_code}
 ```"""
 
-DEPENDENCIES_PROMPT = """Analyze this COBOL program and identify all dependencies.
-
-## Instructions:
-1. For Copybooks: Look for all COPY statements in the code
-2. For Called Programs: Look for all CALL statements in the code
-3. Do not miss any COPY or CALL statement
-
-## Required Output Format:
+DEPENDENCIES_PROMPT = """By analyzing the cobol source code below, provide the Dependencies of the code in below md format, list out all the copybooks and called program, do not miss out one of it.
+For Copybooks, please look for the `COPY` statements in the code.
+For Called Program, please look for the `CALL` statements in the code.
+For each dependency, indicate the line number where it appears in the original code.
 
 ## 6. Dependencies
-
-* **Copybooks**:
-    * `COPY '[COPYBOOK1]'`: [Briefly explain the purpose of this copybook, e.g., record definitions, constants, common routines]
-    * `COPY '[COPYBOOK2]'`: [Briefly explain the purpose of this copybook]
-    * ...
-
-* **Called Programs**:
-    * `CALL '[SUBPROG1]'`: [Briefly explain the purpose of calling this subroutine]
-    * `CALL '[SUBPROG2]'`: [Briefly explain the purpose of calling this subroutine]
-    * ...
-
-If no copybooks or called programs are found, explicitly state "None found in this program."
+  * **Copybooks**:
+      * `[COPY 'COPYBOOK1.CPY']`: [Briefly explain the purpose of this copybook, e.g., record definitions]. (At Line [X])
+	  * `[COPY 'COPYBOOK2.CPY']`: [Briefly explain the purpose of this copybook, e.g., record definitions]. (At Line [X])
+	  ...
+  * **Called Programs**:
+      * `[CALL 'SUBPROG1']`: [Briefly explain the purpose of calling this subroutine]. (At Line [X])
+	  * `[CALL 'SUBPROG2']`: [Briefly explain the purpose of calling this subroutine]. (At Line [X])
+	  ...
 
 COBOL Source Code:
 ```cobol
@@ -1392,7 +1351,8 @@ User may ask you specific question regarding the cobol file, answer the question
 * **Adhere to Original Text**: All explanations and analyses must strictly be based on the provided COBOL code; do not guess or add functionalities not present in the code.
 * **Professional Terminology**: Use professional and accurate terminology while ensuring clarity.
 * **Language**: Conduct analysis and documentation writing in English.
-* **Format**: Strictly follow the defined Markdown output format, without omitting any part."""
+* **Format**: Strictly follow the defined Markdown output format, without omitting any part.
+* **Line References**: When describing code content, always indicate the source line range (e.g., "From Line X to Line Y") so readers can trace back to the original code."""
 
 
 # ============================================================================
@@ -2566,22 +2526,13 @@ def task_combine_and_save(**context) -> dict:
 {row['dependencies']}
 """
 
-        # Combine into final document
-        combined = f"""# COBOL Program Analysis: {row['file_name']}
-
-**Program ID**: {row['program_name']}
-**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-**Analysis Version**: 2.0 (Enhanced with Copybook Resolution, RAGFlow Integration & Validation)
-
----
+        # Combine into final document matching Cobol_Summary_11Nov.json output structure
+        # Clean 6-section markdown: Overview, Flowchart, I/O, Structure, Core Logic, Dependencies
+        combined = f"""# {row['file_name']}
 
 {row['program_overview']}
 
----
-
 {row['flowchart']}
-
----
 
 {row['input_output']}
 {structure_section}
